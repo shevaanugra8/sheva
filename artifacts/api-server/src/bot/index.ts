@@ -242,13 +242,17 @@ export function startBot(): TelegramBot | null {
       const successRate = s.totalClaimed > 0
         ? Math.round((s.delivered / s.totalClaimed) * 100)
         : 0;
+      const ratingLine = s.avgRating !== null
+        ? `⭐ Rating Rata-rata: *${s.avgRating.toFixed(1)}/5* (${s.totalRatings} ulasan)\n`
+        : `⭐ Rating Rata-rata: *Belum ada*\n`;
       text =
         `📊 *Statistik Driver*\n\n` +
         `🚚 Tersedia Sekarang: *${s.available}*\n` +
         `📋 Total Diambil: *${s.totalClaimed}*\n` +
         `🚗 Sedang Diantar: *${s.onTheWay}*\n` +
-        `📦 Berhasil Dikirim: *${s.delivered}*\n\n` +
-        `🏆 Tingkat Keberhasilan: *${successRate}%*`;
+        `📦 Berhasil Dikirim: *${s.delivered}*\n` +
+        ratingLine +
+        `\n🏆 Tingkat Keberhasilan: *${successRate}%*`;
     }
 
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
@@ -444,6 +448,7 @@ export function startBot(): TelegramBot | null {
     const acceptMatch = data.match(/^accept_order:(\d+)$/);
     const claimMatch = data.match(/^claim_order:(\d+)$/);
     const deliverMatch = data.match(/^deliver_order:(\d+)$/);
+    const rateMatch = data.match(/^rate_order:(\d+):([1-5])$/);
 
     if (cancelMatch) {
       const user = store.getUser(userId);
@@ -607,16 +612,74 @@ export function startBot(): TelegramBot | null {
       );
       await bot.answerCallbackQuery(query.id, { text: "Marked as delivered! 🎉" });
 
-      // Notifikasi customer
+      // Notifikasi customer + minta rating
       await notify(
         order.customerId,
         `📦 *Pesanan #${order.id} Telah Sampai!*\n📝 ${order.description}\n\n🎉 Pesananmu sudah terkirim. Terima kasih sudah berbelanja!`,
       );
+      try {
+        await bot.sendMessage(
+          order.customerId,
+          `⭐ *Beri Rating untuk Driver*\n\nBagaimana pengalaman pengirimanmu untuk Pesanan #${order.id}?`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "⭐ 1", callback_data: `rate_order:${order.id}:1` },
+                  { text: "⭐⭐ 2", callback_data: `rate_order:${order.id}:2` },
+                  { text: "⭐⭐⭐ 3", callback_data: `rate_order:${order.id}:3` },
+                  { text: "⭐⭐⭐⭐ 4", callback_data: `rate_order:${order.id}:4` },
+                  { text: "⭐⭐⭐⭐⭐ 5", callback_data: `rate_order:${order.id}:5` },
+                ],
+              ],
+            },
+          },
+        );
+      } catch (err) {
+        logger.warn({ err }, "Failed to send rating prompt");
+      }
       // Notifikasi seller
       if (order.sellerId) {
         await notify(
           order.sellerId,
           `✅ *Pesanan #${order.id} Selesai Dikirim!*\n📝 ${order.description}\n\nPesanan berhasil diterima oleh customer.`,
+        );
+      }
+      return;
+    }
+
+    if (rateMatch) {
+      const orderId = parseInt(rateMatch[1]!, 10);
+      const stars = parseInt(rateMatch[2]!, 10);
+      const order = store.rateOrder(orderId, userId, stars);
+
+      if (!order) {
+        await bot.answerCallbackQuery(query.id, {
+          text: "Rating sudah diberikan atau pesanan tidak valid.",
+          show_alert: true,
+        });
+        return;
+      }
+
+      const starStr = "⭐".repeat(stars);
+      logger.info({ orderId, userId, stars }, "Order rated");
+
+      await bot.editMessageText(
+        `${starStr} *Rating Tersimpan!*\n\nKamu memberi *${stars}/5* bintang untuk pengiriman Pesanan #${order.id}.\nTerima kasih atas penilaianmu!`,
+        {
+          chat_id: chatId,
+          message_id: query.message!.message_id,
+          parse_mode: "Markdown",
+        },
+      );
+      await bot.answerCallbackQuery(query.id, { text: `${starStr} Terima kasih!` });
+
+      // Notifikasi driver tentang rating
+      if (order.driverId) {
+        await notify(
+          order.driverId,
+          `⭐ *Kamu mendapat rating baru!*\n\nPesanan #${order.id}: *${stars}/5* ${starStr}\n\nTerima kasih sudah memberikan pelayanan terbaik!`,
         );
       }
       return;
