@@ -111,6 +111,24 @@ export const store = {
     return Array.from(users.values()).filter((u) => u.role === role);
   },
 
+  getHistoryByCustomer(customerId: number): Order[] {
+    return Array.from(orders.values())
+      .filter((o) => o.customerId === customerId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  },
+
+  getHistoryBySeller(sellerId: number): Order[] {
+    return Array.from(orders.values())
+      .filter((o) => o.sellerId === sellerId)
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  },
+
+  getHistoryByDriver(driverId: number): Order[] {
+    return Array.from(orders.values())
+      .filter((o) => o.driverId === driverId)
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  },
+
   cancelOrder(orderId: number, customerId: number): Order | undefined {
     const order = orders.get(orderId);
     if (!order || order.customerId !== customerId || order.status === "delivered")
