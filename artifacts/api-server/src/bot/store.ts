@@ -20,6 +20,7 @@ export interface Order {
   status: OrderStatus;
   sellerId?: number;
   driverId?: number;
+  rating?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -155,6 +156,11 @@ export const store = {
 
   getStatsDriver(driverId: number) {
     const all = Array.from(orders.values()).filter((o) => o.driverId === driverId);
+    const rated = all.filter((o) => o.rating !== undefined);
+    const avgRating =
+      rated.length > 0
+        ? rated.reduce((sum, o) => sum + (o.rating ?? 0), 0) / rated.length
+        : null;
     return {
       totalClaimed: all.length,
       delivered: all.filter((o) => o.status === "delivered").length,
@@ -162,7 +168,22 @@ export const store = {
       available: Array.from(orders.values()).filter(
         (o) => o.status === "accepted" && !o.driverId,
       ).length,
+      avgRating,
+      totalRatings: rated.length,
     };
+  },
+
+  rateOrder(orderId: number, customerId: number, rating: number): Order | undefined {
+    const order = orders.get(orderId);
+    if (
+      !order ||
+      order.customerId !== customerId ||
+      order.status !== "delivered" ||
+      order.rating !== undefined
+    )
+      return undefined;
+    order.rating = rating;
+    return order;
   },
 
   cancelOrder(orderId: number, customerId: number): Order | undefined {
