@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "../lib/logger";
-import { store, statusEmoji, type Role } from "./store";
+import { store, broadcastState, statusEmoji, type Role, type BroadcastTarget } from "./store";
 
 function formatOrder(o: ReturnType<typeof store.getOrder>): string {
   if (!o) return "";
@@ -56,6 +56,17 @@ function roleMenu(role: Role) {
   return driverKeyboard();
 }
 
+function adminKeyboard(): TelegramBot.ReplyKeyboardMarkup {
+  return {
+    keyboard: [
+      [{ text: "📢 Broadcast Semua" }],
+      [{ text: "📢 ke Customer" }, { text: "📢 ke Seller" }, { text: "📢 ke Driver" }],
+      [{ text: "👥 Daftar User" }, { text: "📈 Statistik Global" }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
 export function startBot(): TelegramBot | null {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   if (!token) {
@@ -77,6 +88,50 @@ export function startBot(): TelegramBot | null {
     } catch (err) {
       logger.warn({ err, chatId }, "Failed to send notification");
     }
+  }
+
+  const adminIds: Set<number> = new Set(
+    (process.env["ADMIN_CHAT_IDS"] ?? "")
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n)),
+  );
+
+  function isAdmin(userId: number): boolean {
+    return adminIds.has(userId);
+  }
+
+  async function doBroadcast(
+    target: BroadcastTarget,
+    message: string,
+    adminChatId: number,
+  ): Promise<void> {
+    const allUsers = store.getUsersByRole("customer")
+      .concat(store.getUsersByRole("seller"))
+      .concat(store.getUsersByRole("driver"));
+
+    const targets =
+      target === "all"
+        ? allUsers
+        : store.getUsersByRole(target as Role);
+
+    let sent = 0;
+    let failed = 0;
+    for (const u of targets) {
+      try {
+        await bot.sendMessage(u.telegramId, `📢 *Pengumuman*\n\n${message}`, {
+          parse_mode: "Markdown",
+        });
+        sent++;
+      } catch {
+        failed++;
+      }
+    }
+    await notify(
+      adminChatId,
+      `✅ Broadcast selesai!\n📤 Terkirim: *${sent}*\n❌ Gagal: *${failed}*`,
+    );
+    logger.info({ target, sent, failed }, "Broadcast sent");
   }
 
   bot.onText(/\/start/, async (msg) => {
@@ -153,6 +208,96 @@ export function startBot(): TelegramBot | null {
     }
     return true;
   }
+
+  bot.onText(/^\/admin$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    if (!isAdmin(userId)) {
+      await bot.sendMessage(chatId, "⛔ Kamu tidak memiliki akses admin.");
+      return;
+    }
+    await bot.sendMessage(
+      chatId,
+      `🛠 *Panel Admin*\n\nSelamat datang di panel admin\\. Pilih aksi:`,
+      { parse_mode: "MarkdownV2", reply_markup: adminKeyboard() },
+    );
+  });
+
+  async function startBroadcast(
+    msg: TelegramBot.Message,
+    target: BroadcastTarget,
+    label: string,
+  ): Promise<void> {
+    const chatId = msg.chat.id;
+    if (!isAdmin(msg.from!.id)) {
+      await bot.sendMessage(chatId, "⛔ Kamu tidak memiliki akses admin.");
+      return;
+    }
+    broadcastState.setPending(msg.from!.id, target);
+    await bot.sendMessage(
+      chatId,
+      `📢 *Broadcast ke ${label}*\n\nKetik pesan yang ingin dikirim.\nKirim /cancel untuk membatalkan.`,
+      { parse_mode: "Markdown" },
+    );
+  }
+
+  bot.onText(/^📢 Broadcast Semua$/, (msg) => startBroadcast(msg, "all", "Semua User"));
+  bot.onText(/^📢 ke Customer$/, (msg) => startBroadcast(msg, "customer", "Customer"));
+  bot.onText(/^📢 ke Seller$/, (msg) => startBroadcast(msg, "seller", "Seller"));
+  bot.onText(/^📢 ke Driver$/, (msg) => startBroadcast(msg, "driver", "Driver"));
+
+  bot.onText(/^\/cancel$/, async (msg) => {
+    const chatId = msg.chat.id;
+    broadcastState.clearPending(msg.from!.id);
+    await bot.sendMessage(chatId, "❌ Aksi dibatalkan.");
+  });
+
+  bot.onText(/^👥 Daftar User$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(msg.from!.id)) return;
+    const customers = store.getUsersByRole("customer");
+    const sellers = store.getUsersByRole("seller");
+    const drivers = store.getUsersByRole("driver");
+    const total = customers.length + sellers.length + drivers.length;
+    const lines = [
+      `👥 *Daftar User (${total} total)*\n`,
+      `👤 Customer (${customers.length}): ${customers.map((u) => `@${u.username}`).join(", ") || "-"}`,
+      `🏪 Seller (${sellers.length}): ${sellers.map((u) => `@${u.username}`).join(", ") || "-"}`,
+      `🚗 Driver (${drivers.length}): ${drivers.map((u) => `@${u.username}`).join(", ") || "-"}`,
+    ];
+    await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown" });
+  });
+
+  bot.onText(/^📈 Statistik Global$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(msg.from!.id)) return;
+    const customers = store.getUsersByRole("customer").length;
+    const sellers = store.getUsersByRole("seller").length;
+    const drivers = store.getUsersByRole("driver").length;
+    // Count orders via all customers
+    const customerUsers = store.getUsersByRole("customer");
+    let totalOrders = 0, pending = 0, delivered = 0, cancelled = 0, onTheWay = 0;
+    for (const u of customerUsers) {
+      const orders = store.getOrdersByCustomer(u.telegramId);
+      totalOrders += orders.length;
+      pending += orders.filter((o) => o.status === "pending").length;
+      delivered += orders.filter((o) => o.status === "delivered").length;
+      cancelled += orders.filter((o) => o.status === "cancelled").length;
+      onTheWay += orders.filter((o) => o.status === "picked_up").length;
+    }
+    const text =
+      `📈 *Statistik Global Bot*\n\n` +
+      `👤 Customer: *${customers}*\n` +
+      `🏪 Seller: *${sellers}*\n` +
+      `🚗 Driver: *${drivers}*\n` +
+      `👥 Total User: *${customers + sellers + drivers}*\n\n` +
+      `📦 Total Pesanan: *${totalOrders}*\n` +
+      `⏳ Pending: *${pending}*\n` +
+      `🚗 Diantar: *${onTheWay}*\n` +
+      `✅ Selesai: *${delivered}*\n` +
+      `❌ Dibatalkan: *${cancelled}*`;
+    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+  });
 
   bot.onText(/^🕒 Riwayat$/, async (msg) => {
     const chatId = msg.chat.id;
@@ -437,6 +582,24 @@ export function startBot(): TelegramBot | null {
       }
       await bot.sendMessage(chatId, formatOrder(order), opts);
     }
+  });
+
+  // Intercept pesan biasa untuk broadcast admin
+  bot.on("message", async (msg) => {
+    if (!msg.text || msg.text.startsWith("/") || !msg.from) return;
+    const userId = msg.from.id;
+    if (!isAdmin(userId)) return;
+    const pending = broadcastState.getPending(userId);
+    if (!pending) return;
+    // Cek bukan tombol menu admin
+    const adminButtons = [
+      "📢 Broadcast Semua", "📢 ke Customer", "📢 ke Seller", "📢 ke Driver",
+      "👥 Daftar User", "📈 Statistik Global",
+    ];
+    if (adminButtons.includes(msg.text)) return;
+    broadcastState.clearPending(userId);
+    await bot.sendMessage(msg.chat.id, `⏳ Mengirim broadcast...`);
+    await doBroadcast(pending, msg.text, msg.chat.id);
   });
 
   bot.on("callback_query", async (query) => {
