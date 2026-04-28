@@ -17,6 +17,7 @@ function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
     keyboard: [
       [{ text: "📦 New Order" }, { text: "📋 My Orders" }],
       [{ text: "❌ Cancel Order" }, { text: "🕒 Riwayat" }],
+      [{ text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
   };
@@ -26,7 +27,7 @@ function sellerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
       [{ text: "📥 Incoming Orders" }, { text: "📋 Accepted Orders" }],
-      [{ text: "🕒 Riwayat" }],
+      [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
   };
@@ -36,7 +37,7 @@ function driverKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
       [{ text: "🚚 Available Deliveries" }, { text: "📋 My Deliveries" }],
-      [{ text: "🕒 Riwayat" }],
+      [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
   };
@@ -195,6 +196,62 @@ export function startBot(): TelegramBot | null {
       const text = chunk.map(formatOrder).join("\n\n─────────────\n\n");
       await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
     }
+  });
+
+  bot.onText(/^📊 Statistik$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    const user = store.getUser(userId);
+
+    if (!user) {
+      await bot.sendMessage(chatId, "Silakan gunakan /start untuk mendaftar terlebih dahulu.");
+      return;
+    }
+
+    let text = "";
+
+    if (user.role === "customer") {
+      const s = store.getStatsCustomer(userId);
+      const successRate = s.total > 0
+        ? Math.round((s.delivered / s.total) * 100)
+        : 0;
+      text =
+        `📊 *Statistik Kamu*\n\n` +
+        `📦 Total Pesanan: *${s.total}*\n` +
+        `⏳ Menunggu Seller: *${s.pending}*\n` +
+        `✅ Diterima Seller: *${s.accepted}*\n` +
+        `🚗 Sedang Diantar: *${s.onTheWay}*\n` +
+        `📦 Selesai Terkirim: *${s.delivered}*\n` +
+        `❌ Dibatalkan: *${s.cancelled}*\n\n` +
+        `🏆 Tingkat Keberhasilan: *${successRate}%*`;
+    } else if (user.role === "seller") {
+      const s = store.getStatsSeller(userId);
+      const successRate = s.totalAccepted > 0
+        ? Math.round((s.delivered / s.totalAccepted) * 100)
+        : 0;
+      text =
+        `📊 *Statistik Seller*\n\n` +
+        `📥 Pesanan Masuk (Pending): *${s.pendingIncoming}*\n` +
+        `✅ Total Diterima: *${s.totalAccepted}*\n` +
+        `🚗 Sedang Dikirim: *${s.onTheWay}*\n` +
+        `📦 Berhasil Terkirim: *${s.delivered}*\n` +
+        `❌ Dibatalkan: *${s.cancelled}*\n\n` +
+        `🏆 Tingkat Penyelesaian: *${successRate}%*`;
+    } else {
+      const s = store.getStatsDriver(userId);
+      const successRate = s.totalClaimed > 0
+        ? Math.round((s.delivered / s.totalClaimed) * 100)
+        : 0;
+      text =
+        `📊 *Statistik Driver*\n\n` +
+        `🚚 Tersedia Sekarang: *${s.available}*\n` +
+        `📋 Total Diambil: *${s.totalClaimed}*\n` +
+        `🚗 Sedang Diantar: *${s.onTheWay}*\n` +
+        `📦 Berhasil Dikirim: *${s.delivered}*\n\n` +
+        `🏆 Tingkat Keberhasilan: *${successRate}%*`;
+    }
+
+    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
   bot.onText(/^❌ Cancel Order$/, async (msg) => {
