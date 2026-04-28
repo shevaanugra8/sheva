@@ -61,6 +61,14 @@ export function startBot(): TelegramBot | null {
     logger.error({ err }, "Telegram polling error");
   });
 
+  async function notify(chatId: number, text: string): Promise<void> {
+    try {
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+    } catch (err) {
+      logger.warn({ err, chatId }, "Failed to send notification");
+    }
+  }
+
   bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
@@ -165,6 +173,15 @@ export function startBot(): TelegramBot | null {
       `✅ Order *#${order.id}* placed\\!\n📝 ${escapeMarkdown(description)}\n\nWaiting for a seller to accept your order\\.`,
       { parse_mode: "MarkdownV2" },
     );
+
+    // Notifikasi semua seller
+    const sellers = store.getUsersByRole("seller");
+    for (const seller of sellers) {
+      await notify(
+        seller.telegramId,
+        `🔔 *Pesanan Baru #${order.id}*\n📝 ${description}\n\nBuka *📥 Incoming Orders* untuk menerima pesanan ini.`,
+      );
+    }
   });
 
   bot.onText(/^\/neworder$/, async (msg) => {
@@ -316,6 +333,20 @@ export function startBot(): TelegramBot | null {
         },
       );
       await bot.answerCallbackQuery(query.id, { text: "Order accepted!" });
+
+      // Notifikasi customer
+      await notify(
+        order.customerId,
+        `✅ *Pesanan #${order.id} Diterima!*\n📝 ${order.description}\n\nPesanan kamu sedang diproses oleh seller. Driver akan segera mengambilnya.`,
+      );
+      // Notifikasi semua driver
+      const drivers = store.getUsersByRole("driver");
+      for (const driver of drivers) {
+        await notify(
+          driver.telegramId,
+          `🚗 *Pesanan Siap Diambil #${order.id}*\n📝 ${order.description}\n\nBuka *🚚 Available Deliveries* untuk mengambil pengiriman ini.`,
+        );
+      }
       return;
     }
 
@@ -353,6 +384,19 @@ export function startBot(): TelegramBot | null {
         },
       );
       await bot.answerCallbackQuery(query.id, { text: "Delivery claimed!" });
+
+      // Notifikasi customer
+      await notify(
+        order.customerId,
+        `🚗 *Pesanan #${order.id} Sedang Diantar!*\n📝 ${order.description}\n\nDriver sudah mengambil pesananmu dan dalam perjalanan.`,
+      );
+      // Notifikasi seller
+      if (order.sellerId) {
+        await notify(
+          order.sellerId,
+          `🚗 *Driver Mengambil Pesanan #${order.id}*\n📝 ${order.description}\n\nPesanan sedang dalam pengiriman.`,
+        );
+      }
       return;
     }
 
@@ -385,6 +429,19 @@ export function startBot(): TelegramBot | null {
         },
       );
       await bot.answerCallbackQuery(query.id, { text: "Marked as delivered! 🎉" });
+
+      // Notifikasi customer
+      await notify(
+        order.customerId,
+        `📦 *Pesanan #${order.id} Telah Sampai!*\n📝 ${order.description}\n\n🎉 Pesananmu sudah terkirim. Terima kasih sudah berbelanja!`,
+      );
+      // Notifikasi seller
+      if (order.sellerId) {
+        await notify(
+          order.sellerId,
+          `✅ *Pesanan #${order.id} Selesai Dikirim!*\n📝 ${order.description}\n\nPesanan berhasil diterima oleh customer.`,
+        );
+      }
       return;
     }
 
