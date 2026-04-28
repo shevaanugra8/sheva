@@ -107,6 +107,10 @@ export const store = {
     return Array.from(orders.values()).filter((o) => o.sellerId === sellerId);
   },
 
+  getUsersByRole(role: Role): BotUser[] {
+    return Array.from(users.values()).filter((u) => u.role === role);
+  },
+
   cancelOrder(orderId: number, customerId: number): Order | undefined {
     const order = orders.get(orderId);
     if (!order || order.customerId !== customerId || order.status === "delivered")
