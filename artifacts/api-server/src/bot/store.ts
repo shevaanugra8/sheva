@@ -129,6 +129,42 @@ export const store = {
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   },
 
+  getStatsCustomer(customerId: number) {
+    const all = Array.from(orders.values()).filter((o) => o.customerId === customerId);
+    return {
+      total: all.length,
+      pending: all.filter((o) => o.status === "pending").length,
+      accepted: all.filter((o) => o.status === "accepted").length,
+      onTheWay: all.filter((o) => o.status === "picked_up").length,
+      delivered: all.filter((o) => o.status === "delivered").length,
+      cancelled: all.filter((o) => o.status === "cancelled").length,
+    };
+  },
+
+  getStatsSeller(sellerId: number) {
+    const all = Array.from(orders.values()).filter((o) => o.sellerId === sellerId);
+    const pending = Array.from(orders.values()).filter((o) => o.status === "pending").length;
+    return {
+      totalAccepted: all.length,
+      delivered: all.filter((o) => o.status === "delivered").length,
+      onTheWay: all.filter((o) => o.status === "picked_up").length,
+      cancelled: all.filter((o) => o.status === "cancelled").length,
+      pendingIncoming: pending,
+    };
+  },
+
+  getStatsDriver(driverId: number) {
+    const all = Array.from(orders.values()).filter((o) => o.driverId === driverId);
+    return {
+      totalClaimed: all.length,
+      delivered: all.filter((o) => o.status === "delivered").length,
+      onTheWay: all.filter((o) => o.status === "picked_up").length,
+      available: Array.from(orders.values()).filter(
+        (o) => o.status === "accepted" && !o.driverId,
+      ).length,
+    };
+  },
+
   cancelOrder(orderId: number, customerId: number): Order | undefined {
     const order = orders.get(orderId);
     if (!order || order.customerId !== customerId || order.status === "delivered")
