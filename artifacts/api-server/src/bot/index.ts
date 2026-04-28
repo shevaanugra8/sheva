@@ -16,7 +16,7 @@ function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
       [{ text: "📦 New Order" }, { text: "📋 My Orders" }],
-      [{ text: "❌ Cancel Order" }],
+      [{ text: "❌ Cancel Order" }, { text: "🕒 Riwayat" }],
     ],
     resize_keyboard: true,
   };
@@ -24,14 +24,20 @@ function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
 
 function sellerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
-    keyboard: [[{ text: "📥 Incoming Orders" }, { text: "📋 Accepted Orders" }]],
+    keyboard: [
+      [{ text: "📥 Incoming Orders" }, { text: "📋 Accepted Orders" }],
+      [{ text: "🕒 Riwayat" }],
+    ],
     resize_keyboard: true,
   };
 }
 
 function driverKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
-    keyboard: [[{ text: "🚚 Available Deliveries" }, { text: "📋 My Deliveries" }]],
+    keyboard: [
+      [{ text: "🚚 Available Deliveries" }, { text: "📋 My Deliveries" }],
+      [{ text: "🕒 Riwayat" }],
+    ],
     resize_keyboard: true,
   };
 }
@@ -146,6 +152,50 @@ export function startBot(): TelegramBot | null {
     }
     return true;
   }
+
+  bot.onText(/^🕒 Riwayat$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    const user = store.getUser(userId);
+
+    if (!user) {
+      await bot.sendMessage(chatId, "Silakan gunakan /start untuk mendaftar terlebih dahulu.");
+      return;
+    }
+
+    let history: ReturnType<typeof store.getHistoryByCustomer> = [];
+    let title = "";
+
+    if (user.role === "customer") {
+      history = store.getHistoryByCustomer(userId);
+      title = "📋 *Riwayat Pesanan Kamu*";
+    } else if (user.role === "seller") {
+      history = store.getHistoryBySeller(userId);
+      title = "📋 *Riwayat Pesanan Seller*";
+    } else {
+      history = store.getHistoryByDriver(userId);
+      title = "📋 *Riwayat Pengiriman Kamu*";
+    }
+
+    if (history.length === 0) {
+      await bot.sendMessage(chatId, "Belum ada riwayat pesanan.", { parse_mode: "Markdown" });
+      return;
+    }
+
+    const BATCH = 5;
+    await bot.sendMessage(chatId, `${title}\n_Menampilkan ${Math.min(history.length, BATCH * 2)} pesanan terbaru, diurutkan dari yang terbaru._`, {
+      parse_mode: "Markdown",
+    });
+
+    const toShow = history.slice(0, BATCH * 2);
+    const chunks: typeof toShow[] = [];
+    for (let i = 0; i < toShow.length; i += BATCH) chunks.push(toShow.slice(i, i + BATCH));
+
+    for (const chunk of chunks) {
+      const text = chunk.map(formatOrder).join("\n\n─────────────\n\n");
+      await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+    }
+  });
 
   bot.onText(/^❌ Cancel Order$/, async (msg) => {
     const chatId = msg.chat.id;
