@@ -29,6 +29,22 @@ const users = new Map<number, BotUser>();
 const orders = new Map<number, Order>();
 let orderCounter = 1;
 
+export type BroadcastTarget = "all" | "customer" | "seller" | "driver";
+
+const pendingBroadcast = new Map<number, BroadcastTarget>();
+
+export const broadcastState = {
+  setPending(adminId: number, target: BroadcastTarget): void {
+    pendingBroadcast.set(adminId, target);
+  },
+  getPending(adminId: number): BroadcastTarget | undefined {
+    return pendingBroadcast.get(adminId);
+  },
+  clearPending(adminId: number): void {
+    pendingBroadcast.delete(adminId);
+  },
+};
+
 export const store = {
   getUser(telegramId: number): BotUser | undefined {
     return users.get(telegramId);
