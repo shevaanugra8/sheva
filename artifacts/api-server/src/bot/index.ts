@@ -14,7 +14,10 @@ function formatOrder(o: ReturnType<typeof store.getOrder>): string {
 
 function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
-    keyboard: [[{ text: "📦 New Order" }, { text: "📋 My Orders" }]],
+    keyboard: [
+      [{ text: "📦 New Order" }, { text: "📋 My Orders" }],
+      [{ text: "❌ Cancel Order" }],
+    ],
     resize_keyboard: true,
   };
 }
@@ -143,6 +146,36 @@ export function startBot(): TelegramBot | null {
     }
     return true;
   }
+
+  bot.onText(/^❌ Cancel Order$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
+
+    const myOrders = store.getOrdersByCustomer(msg.from!.id).filter(
+      (o) => o.status === "pending" || o.status === "accepted",
+    );
+
+    if (myOrders.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "Tidak ada pesanan yang bisa dibatalkan\\.\n\n_Pesanan hanya bisa dibatalkan sebelum diambil driver\\._",
+        { parse_mode: "MarkdownV2" },
+      );
+      return;
+    }
+
+    await bot.sendMessage(chatId, "Pilih pesanan yang ingin dibatalkan:");
+    for (const order of myOrders) {
+      await bot.sendMessage(chatId, formatOrder(order), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "❌ Batalkan Pesanan Ini", callback_data: `cancel_order:${order.id}` }],
+          ],
+        },
+      });
+    }
+  });
 
   bot.onText(/^📦 New Order$/, async (msg) => {
     const chatId = msg.chat.id;
@@ -300,9 +333,46 @@ export function startBot(): TelegramBot | null {
     const userId = query.from.id;
     const data = query.data ?? "";
 
+    const cancelMatch = data.match(/^cancel_order:(\d+)$/);
     const acceptMatch = data.match(/^accept_order:(\d+)$/);
     const claimMatch = data.match(/^claim_order:(\d+)$/);
     const deliverMatch = data.match(/^deliver_order:(\d+)$/);
+
+    if (cancelMatch) {
+      const user = store.getUser(userId);
+      if (!user || user.role !== "customer") {
+        await bot.answerCallbackQuery(query.id, {
+          text: "Hanya customer yang bisa membatalkan pesanan.",
+          show_alert: true,
+        });
+        return;
+      }
+      const orderId = parseInt(cancelMatch[1]!, 10);
+      const order = store.cancelOrder(orderId, userId);
+      if (!order) {
+        await bot.editMessageText(
+          "⚠️ Pesanan tidak bisa dibatalkan. Mungkin sudah diambil driver atau sudah selesai.",
+          { chat_id: chatId, message_id: query.message!.message_id },
+        );
+        await bot.answerCallbackQuery(query.id);
+        return;
+      }
+      logger.info({ orderId, customerId: userId }, "Order cancelled");
+      await bot.editMessageText(
+        `${formatOrder(order)}\n\n❌ Pesanan telah dibatalkan.`,
+        { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
+      );
+      await bot.answerCallbackQuery(query.id, { text: "Pesanan dibatalkan." });
+
+      // Notifikasi seller jika sudah menerima pesanan
+      if (order.sellerId) {
+        await notify(
+          order.sellerId,
+          `❌ *Pesanan #${order.id} Dibatalkan*\n📝 ${order.description}\n\nCustomer telah membatalkan pesanan ini.`,
+        );
+      }
+      return;
+    }
 
     if (acceptMatch) {
       const user = store.getUser(userId);
