@@ -7,10 +7,13 @@ import {
   cartState,
   menuEditState,
   customOrderState,
+  pendingSellerOrderState,
+  deliveryPendingState,
   menuStore,
   statusEmoji,
   SELLER_PASSWORD,
   DRIVER_PASSWORD,
+  DELIVERY_RATE_PER_KM,
   type Role,
   type BroadcastTarget,
 } from "./store";
@@ -21,9 +24,14 @@ function formatRupiah(n: number): string {
 
 function formatOrder(o: ReturnType<typeof store.getOrder>): string {
   if (!o) return "";
+  const deliveryLine =
+    o.distanceKm !== undefined && o.deliveryCost !== undefined
+      ? `\n🚚 Jarak: *${o.distanceKm} km* | Ongkir: *${formatRupiah(o.deliveryCost)}*`
+      : "";
+  const sellerTag = o.sellerCreated ? " _(dibuat seller)_" : "";
   return (
-    `*Pesanan #${o.id}*\n` +
-    `📝 ${o.description}\n` +
+    `*Pesanan #${o.id}*${sellerTag}\n` +
+    `📝 ${o.description}${deliveryLine}\n` +
     `${statusEmoji[o.status]} Status: *${statusLabel(o.status)}*\n` +
     `🕒 ${o.createdAt.toLocaleString("id-ID")}`
   );
@@ -55,7 +63,7 @@ function sellerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
       [{ text: "📥 Pesanan Masuk" }, { text: "📋 Pesanan Diterima" }],
-      [{ text: "✏️ Kelola Menu" }],
+      [{ text: "📝 Buat Pesanan" }, { text: "✏️ Kelola Menu" }],
       [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
@@ -115,17 +123,12 @@ function menuItemsKeyboard(
   const items = menuStore.getByCategory(category);
   const rows: TelegramBot.InlineKeyboardButton[][] = [];
 
-  for (let i = 0; i < items.length; i += 2) {
-    const row: TelegramBot.InlineKeyboardButton[] = [];
-    const a = items[i]!;
-    const labelA = a.price > 0 ? `${a.name} — ${formatRupiah(a.price)}` : `${a.name} — Tanya harga`;
-    row.push({ text: labelA, callback_data: `cart_add:${a.id}` });
-    if (items[i + 1]) {
-      const b = items[i + 1]!;
-      const labelB = b.price > 0 ? `${b.name} — ${formatRupiah(b.price)}` : `${b.name} — Tanya harga`;
-      row.push({ text: labelB, callback_data: `cart_add:${b.id}` });
-    }
-    rows.push(row);
+  for (const item of items) {
+    const label =
+      item.price > 0
+        ? `${item.name} — ${formatRupiah(item.price)}`
+        : `${item.name} — Tanya harga`;
+    rows.push([{ text: label, callback_data: `cart_add:${item.id}` }]);
   }
 
   const count = cartState.count(userId);
@@ -344,6 +347,9 @@ export function startBot(): TelegramBot | null {
     broadcastState.clearPending(userId);
     menuEditState.clear(userId);
     customOrderState.clear(userId);
+    pendingSellerOrderState.clear(userId);
+    deliveryPendingState.clear(userId);
+    cartState.clear(userId);
     await bot.sendMessage(chatId, "❌ Aksi dibatalkan.", {
       reply_markup: store.getUser(userId) ? roleMenu(store.getUser(userId)!.role) : roleKeyboard(),
     });
@@ -602,6 +608,20 @@ export function startBot(): TelegramBot | null {
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
+  // ─── Seller: Buat Pesanan (kirim langsung ke driver) ─────────────────────
+  bot.onText(/^📝 Buat Pesanan$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    const user = store.getUser(userId);
+    if (!user || user.role !== "seller") return;
+    pendingSellerOrderState.set(userId);
+    await bot.sendMessage(
+      chatId,
+      `📝 *Buat Pesanan Baru*\n\nKetikkan deskripsi pesanan yang ingin dikirim ke driver.\n\n_Contoh: 2 porsi nasi goreng + 1 es teh, kirim ke Jl. Merdeka No. 5_\n\nKirim /cancel untuk batal.`,
+      { parse_mode: "Markdown" },
+    );
+  });
+
   // ─── Seller: Kelola Menu ───────────────────────────────────────────────────
   bot.onText(/^✏️ Kelola Menu$/, async (msg) => {
     const chatId = msg.chat.id;
@@ -714,7 +734,7 @@ export function startBot(): TelegramBot | null {
       return;
     }
 
-    // ── 2. Custom order (pesanan lainnya) ────────────────────────────────────
+    // ── 2. Custom order (pesanan lainnya) → tanya jarak ─────────────────────
     if (customOrderState.has(userId)) {
       const skipCustom = [
         "🛍 Pesan Baru", "📋 Pesanan Saya", "🛒 Keranjang", "❌ Batalkan Pesanan",
@@ -722,20 +742,72 @@ export function startBot(): TelegramBot | null {
       ];
       if (skipCustom.includes(text)) return;
       customOrderState.clear(userId);
-      const order = store.createOrder(userId, text);
-      logger.info({ orderId: order.id, customerId: userId }, "Custom order created");
+      deliveryPendingState.set(userId, { description: text, itemsTotal: 0, initiatedBy: "customer" });
       await bot.sendMessage(
         chatId,
-        `✅ Pesanan *#${order.id}* berhasil dibuat!\n📝 ${text}\n\nMenunggu seller menerima pesananmu.`,
+        `📝 *Pesanan:* ${text}\n\n🚚 Ongkir: Rp 1.500/km\n\n📍 Berapa jarak pengirimanmu? (ketik angka km, contoh: *3* atau *2.5*)`,
         { parse_mode: "Markdown" },
       );
-      const sellers = store.getUsersByRole("seller");
-      for (const seller of sellers) {
-        await notify(
-          seller.telegramId,
-          `🔔 *Pesanan Baru #${order.id}*\n📝 ${text}\n\nBuka *📥 Pesanan Masuk* untuk menerima.`,
-        );
+      return;
+    }
+
+    // ── 2b. Seller order → tanya jarak ──────────────────────────────────────
+    if (pendingSellerOrderState.has(userId)) {
+      const skipSeller = [
+        "📥 Pesanan Masuk", "📋 Pesanan Diterima", "📝 Buat Pesanan",
+        "✏️ Kelola Menu", "🕒 Riwayat", "📊 Statistik",
+      ];
+      if (skipSeller.includes(text)) return;
+      pendingSellerOrderState.clear(userId);
+      deliveryPendingState.set(userId, { description: text, itemsTotal: 0, initiatedBy: "seller" });
+      await bot.sendMessage(
+        chatId,
+        `📝 *Pesanan:* ${text}\n\n🚚 Ongkir: Rp 1.500/km\n\n📍 Berapa jarak pengiriman? (ketik angka km, contoh: *3* atau *2.5*)`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    // ── 2c. Input jarak untuk delivery cost ──────────────────────────────────
+    const deliveryPending = deliveryPendingState.get(userId);
+    if (deliveryPending) {
+      const skipDelivery = [
+        "🛍 Pesan Baru", "📋 Pesanan Saya", "🛒 Keranjang", "❌ Batalkan Pesanan",
+        "📥 Pesanan Masuk", "📋 Pesanan Diterima", "📝 Buat Pesanan",
+        "✏️ Kelola Menu", "🕒 Riwayat", "📊 Statistik",
+      ];
+      if (skipDelivery.includes(text)) return;
+      const distanceKm = parseFloat(text.replace(",", "."));
+      if (isNaN(distanceKm) || distanceKm <= 0) {
+        await bot.sendMessage(chatId, "Jarak tidak valid. Ketik angka km, contoh: *3* atau *2.5*", {
+          parse_mode: "Markdown",
+        });
+        return;
       }
+      const deliveryCost = Math.round(distanceKm * DELIVERY_RATE_PER_KM);
+      const grandTotal = deliveryPending.itemsTotal + deliveryCost;
+      const subtotalLine = deliveryPending.itemsTotal > 0
+        ? `💰 Subtotal: *${formatRupiah(deliveryPending.itemsTotal)}*\n`
+        : "";
+      await bot.sendMessage(
+        chatId,
+        `📋 *Konfirmasi Pesanan*\n\n` +
+        `📝 ${deliveryPending.description}\n\n` +
+        `${subtotalLine}` +
+        `🚚 Jarak: *${distanceKm} km*\n` +
+        `📦 Ongkir: *${formatRupiah(deliveryCost)}*\n` +
+        (deliveryPending.itemsTotal > 0 ? `💵 Total Bayar: *${formatRupiah(grandTotal)}*\n` : "") +
+        `\nSetuju dengan biaya pengiriman ini?`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "✅ Setuju & Pesan", callback_data: `delivery_ok:${distanceKm}:${deliveryCost}` },
+              { text: "❌ Batal", callback_data: "delivery_cancel" },
+            ]],
+          },
+        },
+      );
       return;
     }
 
@@ -857,6 +929,76 @@ export function startBot(): TelegramBot | null {
     const userId = query.from.id;
     const data = query.data ?? "";
 
+    // ── Delivery: konfirmasi biaya ────────────────────────────────────────────
+    const deliveryOkMatch = data.match(/^delivery_ok:([\d.]+):(\d+)$/);
+    if (deliveryOkMatch) {
+      await bot.answerCallbackQuery(query.id);
+      const pending = deliveryPendingState.get(userId);
+      if (!pending) {
+        await bot.sendMessage(chatId, "Sesi pesanan sudah habis. Silakan mulai ulang.");
+        return;
+      }
+      const distanceKm = parseFloat(deliveryOkMatch[1]!);
+      const deliveryCost = parseInt(deliveryOkMatch[2]!, 10);
+      deliveryPendingState.clear(userId);
+
+      const isSellerCreated = pending.initiatedBy === "seller";
+      const order = store.createOrder(
+        userId,
+        pending.description,
+        { sellerCreated: isSellerCreated, distanceKm, deliveryCost },
+      );
+      logger.info({ orderId: order.id, userId, isSellerCreated }, "Order confirmed with delivery cost");
+
+      const grandTotal = pending.itemsTotal + deliveryCost;
+      const totalLine = pending.itemsTotal > 0 ? `\n💵 Total Bayar: *${formatRupiah(grandTotal)}*` : "";
+
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [[{ text: "✅ Pesanan dikonfirmasi", callback_data: "noop" }]] },
+        { chat_id: chatId, message_id: query.message!.message_id },
+      );
+      await bot.sendMessage(
+        chatId,
+        `✅ *Pesanan #${order.id} berhasil dibuat!*\n\n` +
+        `📝 ${pending.description}\n` +
+        `🚚 Jarak: *${distanceKm} km* | Ongkir: *${formatRupiah(deliveryCost)}*${totalLine}\n\n` +
+        (isSellerCreated ? `Driver akan segera mengambil pesanan ini.` : `Menunggu seller menerima pesananmu.`),
+        { parse_mode: "Markdown" },
+      );
+
+      if (isSellerCreated) {
+        // Seller buat pesanan → auto-accept lalu notify driver
+        store.acceptOrder(order.id, userId);
+        const drivers = store.getUsersByRole("driver");
+        for (const driver of drivers) {
+          await notify(
+            driver.telegramId,
+            `🔔 *Pesanan Baru dari Seller #${order.id}*\n📝 ${pending.description}\n🚚 Jarak: ${distanceKm} km | Ongkir: ${formatRupiah(deliveryCost)}\n\nBuka *🚚 Pengiriman Tersedia* untuk mengambil.`,
+          );
+        }
+      } else {
+        // Customer buat pesanan → notify seller
+        const sellers = store.getUsersByRole("seller");
+        for (const seller of sellers) {
+          await notify(
+            seller.telegramId,
+            `🔔 *Pesanan Baru #${order.id}*\n📝 ${pending.description}\n🚚 Ongkir: ${formatRupiah(deliveryCost)}\n\nBuka *📥 Pesanan Masuk* untuk menerima.`,
+          );
+        }
+      }
+      return;
+    }
+
+    if (data === "delivery_cancel") {
+      await bot.answerCallbackQuery(query.id, { text: "Pesanan dibatalkan." });
+      deliveryPendingState.clear(userId);
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [[{ text: "❌ Dibatalkan", callback_data: "noop" }]] },
+        { chat_id: chatId, message_id: query.message!.message_id },
+      );
+      return;
+    }
+
     // ── Catalog: pilih kategori ──────────────────────────────────────────────
     if (data === "menu_back") {
       await bot.answerCallbackQuery(query.id);
@@ -948,7 +1090,7 @@ export function startBot(): TelegramBot | null {
       return;
     }
 
-    // ── Cart: konfirmasi & buat pesanan ─────────────────────────────────────
+    // ── Cart: konfirmasi → tanya jarak dulu ─────────────────────────────────
     if (data === "cart_confirm") {
       await bot.answerCallbackQuery(query.id);
       const items = cartState.get(userId);
@@ -959,20 +1101,12 @@ export function startBot(): TelegramBot | null {
       const description = cartState.buildDescription(userId);
       const total = cartState.total(userId);
       cartState.clear(userId);
-      const order = store.createOrder(userId, description);
-      logger.info({ orderId: order.id, customerId: userId }, "Order created from cart");
+      deliveryPendingState.set(userId, { description, itemsTotal: total, initiatedBy: "customer" });
       await bot.sendMessage(
         chatId,
-        `✅ Pesanan *#${order.id}* berhasil dibuat!\n\n📝 ${description}\n💰 Total: *${formatRupiah(total)}*\n\nMenunggu seller menerima pesananmu.`,
+        `🛍 *Ringkasan Pesanan*\n\n${description}\n\n💰 Subtotal: *${formatRupiah(total)}*\n🚚 Ongkir: Rp 1.500/km\n\n📍 Berapa jarak pengirimanmu? (ketik angka km, contoh: *3* atau *2.5*)`,
         { parse_mode: "Markdown" },
       );
-      const sellers = store.getUsersByRole("seller");
-      for (const seller of sellers) {
-        await notify(
-          seller.telegramId,
-          `🔔 *Pesanan Baru #${order.id}*\n📝 ${description}\n💰 Total: ${formatRupiah(total)}\n\nBuka *📥 Pesanan Masuk* untuk menerima.`,
-        );
-      }
       return;
     }
 
@@ -1154,24 +1288,33 @@ export function startBot(): TelegramBot | null {
         { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
       );
       await bot.answerCallbackQuery(query.id, { text: "Pengiriman selesai!" });
-      if (order.sellerId) {
-        await notify(order.sellerId, `📦 *Pesanan #${order.id} berhasil terkirim!*`);
-      }
-      await bot.sendMessage(
-        order.customerId,
-        `📦 *Pesanan #${order.id} sudah sampai!*\n\n${order.description}\n\nBeri rating untuk driver kamu:`,
-        {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [1, 2, 3, 4, 5].map((r) => ({
-                text: "⭐".repeat(r),
-                callback_data: `rate_order:${order.id}:${r}`,
-              })),
-            ],
+
+      if (order.sellerCreated) {
+        // Pesanan dibuat seller → notif seller saja, tidak ada rating customer
+        if (order.sellerId) {
+          await notify(order.sellerId, `📦 *Pesanan #${order.id} berhasil terkirim!*\n📝 ${order.description}`);
+        }
+      } else {
+        // Pesanan dari customer → notif seller + minta rating
+        if (order.sellerId) {
+          await notify(order.sellerId, `📦 *Pesanan #${order.id} berhasil terkirim!*`);
+        }
+        await bot.sendMessage(
+          order.customerId,
+          `📦 *Pesanan #${order.id} sudah sampai!*\n\n${order.description}\n\nBeri rating untuk driver kamu:`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [1, 2, 3, 4, 5].map((r) => ({
+                  text: "⭐".repeat(r),
+                  callback_data: `rate_order:${order.id}:${r}`,
+                })),
+              ],
+            },
           },
-        },
-      );
+        );
+      }
       return;
     }
 
