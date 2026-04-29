@@ -21,8 +21,17 @@ export interface Order {
   sellerId?: number;
   driverId?: number;
   rating?: number;
+  sellerCreated?: boolean;
+  distanceKm?: number;
+  deliveryCost?: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface DeliveryPending {
+  description: string;
+  itemsTotal: number;
+  initiatedBy: "customer" | "seller";
 }
 
 export interface MenuItem {
@@ -78,7 +87,6 @@ addMenu("makanan", "Dimsum Half Mentai Original 6pcs", 28000);
 addMenu("makanan", "Dimsum Half Mentai Original 8pcs", 38000);
 addMenu("makanan", "Dimsum Half Mentai Original 10pcs", 44000);
 addMenu("makanan", "Dimsum Half Mentai Original 16pcs", 70000);
-addMenu("makanan", "Cold Press Juice", 0);
 addMenu("minuman", "Missed Red Hydra 150ml", 15000);
 addMenu("minuman", "Missed Yellow Boost 150ml", 15000);
 addMenu("minuman", "Missed Green Detox 150ml", 15000);
@@ -93,6 +101,8 @@ const pendingRoleAuth = new Map<number, Role>();
 const cartMap = new Map<number, CartItem[]>();
 const menuEditMap = new Map<number, MenuEditPhase>();
 const pendingCustomOrder = new Map<number, true>();
+const pendingSellerOrderMap = new Map<number, true>();
+const deliveryPendingMap = new Map<number, DeliveryPending>();
 
 export const broadcastState = {
   setPending(adminId: number, target: BroadcastTarget): void {
@@ -188,6 +198,32 @@ export const customOrderState = {
   },
 };
 
+export const pendingSellerOrderState = {
+  set(userId: number): void {
+    pendingSellerOrderMap.set(userId, true);
+  },
+  has(userId: number): boolean {
+    return pendingSellerOrderMap.has(userId);
+  },
+  clear(userId: number): void {
+    pendingSellerOrderMap.delete(userId);
+  },
+};
+
+export const DELIVERY_RATE_PER_KM = 1500;
+
+export const deliveryPendingState = {
+  set(userId: number, data: DeliveryPending): void {
+    deliveryPendingMap.set(userId, data);
+  },
+  get(userId: number): DeliveryPending | undefined {
+    return deliveryPendingMap.get(userId);
+  },
+  clear(userId: number): void {
+    deliveryPendingMap.delete(userId);
+  },
+};
+
 export const menuStore = {
   getAll(): MenuItem[] {
     return Array.from(menuItems.values());
@@ -251,12 +287,19 @@ export const store = {
     return user;
   },
 
-  createOrder(customerId: number, description: string): Order {
+  createOrder(
+    customerId: number,
+    description: string,
+    extra?: { sellerCreated?: boolean; distanceKm?: number; deliveryCost?: number },
+  ): Order {
     const order: Order = {
       id: orderCounter++,
       customerId,
       description,
       status: "pending",
+      sellerCreated: extra?.sellerCreated,
+      distanceKm: extra?.distanceKm,
+      deliveryCost: extra?.deliveryCost,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
