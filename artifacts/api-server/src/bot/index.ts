@@ -1,23 +1,51 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "../lib/logger";
-import { store, broadcastState, statusEmoji, type Role, type BroadcastTarget } from "./store";
+import {
+  store,
+  broadcastState,
+  roleAuthState,
+  cartState,
+  menuEditState,
+  customOrderState,
+  menuStore,
+  statusEmoji,
+  SELLER_PASSWORD,
+  DRIVER_PASSWORD,
+  type Role,
+  type BroadcastTarget,
+} from "./store";
+
+function formatRupiah(n: number): string {
+  return `Rp ${n.toLocaleString("id-ID")}`;
+}
 
 function formatOrder(o: ReturnType<typeof store.getOrder>): string {
   if (!o) return "";
   return (
-    `*Order #${o.id}*\n` +
+    `*Pesanan #${o.id}*\n` +
     `📝 ${o.description}\n` +
-    `${statusEmoji[o.status]} Status: *${o.status.replace("_", " ")}*\n` +
-    `🕒 ${o.createdAt.toLocaleString()}`
+    `${statusEmoji[o.status]} Status: *${statusLabel(o.status)}*\n` +
+    `🕒 ${o.createdAt.toLocaleString("id-ID")}`
   );
+}
+
+function statusLabel(s: string): string {
+  const map: Record<string, string> = {
+    pending: "Menunggu",
+    accepted: "Diterima Seller",
+    picked_up: "Sedang Diantar",
+    delivered: "Sudah Dikirim",
+    cancelled: "Dibatalkan",
+  };
+  return map[s] ?? s;
 }
 
 function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
-      [{ text: "📦 New Order" }, { text: "📋 My Orders" }],
-      [{ text: "❌ Cancel Order" }, { text: "🕒 Riwayat" }],
-      [{ text: "📊 Statistik" }],
+      [{ text: "🛍 Pesan Baru" }, { text: "📋 Pesanan Saya" }],
+      [{ text: "🛒 Keranjang" }, { text: "❌ Batalkan Pesanan" }],
+      [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
   };
@@ -26,7 +54,8 @@ function customerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
 function sellerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
-      [{ text: "📥 Incoming Orders" }, { text: "📋 Accepted Orders" }],
+      [{ text: "📥 Pesanan Masuk" }, { text: "📋 Pesanan Diterima" }],
+      [{ text: "✏️ Kelola Menu" }],
       [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
@@ -36,7 +65,7 @@ function sellerKeyboard(): TelegramBot.ReplyKeyboardMarkup {
 function driverKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
-      [{ text: "🚚 Available Deliveries" }, { text: "📋 My Deliveries" }],
+      [{ text: "🚚 Pengiriman Tersedia" }, { text: "📋 Pengiriman Saya" }],
       [{ text: "🕒 Riwayat" }, { text: "📊 Statistik" }],
     ],
     resize_keyboard: true,
@@ -50,12 +79,6 @@ function roleKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   };
 }
 
-function roleMenu(role: Role) {
-  if (role === "customer") return customerKeyboard();
-  if (role === "seller") return sellerKeyboard();
-  return driverKeyboard();
-}
-
 function adminKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   return {
     keyboard: [
@@ -67,11 +90,77 @@ function adminKeyboard(): TelegramBot.ReplyKeyboardMarkup {
   };
 }
 
+function roleMenu(role: Role) {
+  if (role === "customer") return customerKeyboard();
+  if (role === "seller") return sellerKeyboard();
+  return driverKeyboard();
+}
+
+function menuCategoryKeyboard(): TelegramBot.InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🍱 Makanan", callback_data: "menu_cat:makanan" },
+        { text: "🥤 Minuman", callback_data: "menu_cat:minuman" },
+      ],
+      [{ text: "📝 Pesanan Lainnya", callback_data: "menu_custom" }],
+    ],
+  };
+}
+
+function menuItemsKeyboard(
+  category: "makanan" | "minuman",
+  userId: number,
+): TelegramBot.InlineKeyboardMarkup {
+  const items = menuStore.getByCategory(category);
+  const rows: TelegramBot.InlineKeyboardButton[][] = [];
+
+  for (let i = 0; i < items.length; i += 2) {
+    const row: TelegramBot.InlineKeyboardButton[] = [];
+    const a = items[i]!;
+    const labelA = a.price > 0 ? `${a.name} — ${formatRupiah(a.price)}` : `${a.name} — Tanya harga`;
+    row.push({ text: labelA, callback_data: `cart_add:${a.id}` });
+    if (items[i + 1]) {
+      const b = items[i + 1]!;
+      const labelB = b.price > 0 ? `${b.name} — ${formatRupiah(b.price)}` : `${b.name} — Tanya harga`;
+      row.push({ text: labelB, callback_data: `cart_add:${b.id}` });
+    }
+    rows.push(row);
+  }
+
+  const count = cartState.count(userId);
+  const total = cartState.total(userId);
+  const cartLabel =
+    count > 0
+      ? `🛒 Keranjang (${count} item · ${formatRupiah(total)})`
+      : "🛒 Keranjang kosong";
+
+  rows.push([
+    { text: "🔙 Ganti Kategori", callback_data: "menu_back" },
+    { text: cartLabel, callback_data: "cart_view" },
+  ]);
+  rows.push([{ text: "✅ Konfirmasi Pesanan", callback_data: "cart_confirm" }]);
+
+  return { inline_keyboard: rows };
+}
+
+function cartKeyboard(): TelegramBot.InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🗑 Kosongkan Keranjang", callback_data: "cart_clear" },
+        { text: "✅ Pesan Sekarang", callback_data: "cart_confirm" },
+      ],
+      [{ text: "🔙 Kembali ke Menu", callback_data: "menu_back" }],
+    ],
+  };
+}
+
 export function startBot(): TelegramBot | null {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   if (!token) {
     logger.warn(
-      "TELEGRAM_BOT_TOKEN is not set — Telegram bot will not start. Set the environment variable and restart.",
+      "TELEGRAM_BOT_TOKEN tidak diset — bot Telegram tidak akan berjalan. Set environment variable dan restart.",
     );
     return null;
   }
@@ -86,7 +175,7 @@ export function startBot(): TelegramBot | null {
     try {
       await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
     } catch (err) {
-      logger.warn({ err, chatId }, "Failed to send notification");
+      logger.warn({ err, chatId }, "Gagal mengirim notifikasi");
     }
   }
 
@@ -106,14 +195,12 @@ export function startBot(): TelegramBot | null {
     message: string,
     adminChatId: number,
   ): Promise<void> {
-    const allUsers = store.getUsersByRole("customer")
+    const allUsers = store
+      .getUsersByRole("customer")
       .concat(store.getUsersByRole("seller"))
       .concat(store.getUsersByRole("driver"));
 
-    const targets =
-      target === "all"
-        ? allUsers
-        : store.getUsersByRole(target as Role);
+    const targets = target === "all" ? allUsers : store.getUsersByRole(target as Role);
 
     let sent = 0;
     let failed = 0;
@@ -134,93 +221,101 @@ export function startBot(): TelegramBot | null {
     logger.info({ target, sent, failed }, "Broadcast sent");
   }
 
+  // ─── /start ───────────────────────────────────────────────────────────────
   bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
-    const firstName = msg.from!.first_name ?? "there";
+    const firstName = msg.from!.first_name ?? "Kamu";
     const existing = store.getUser(userId);
 
     if (existing) {
       await bot.sendMessage(
         chatId,
-        `Welcome back, *${firstName}*\\! You are registered as a *${existing.role}*\\.`,
-        { parse_mode: "MarkdownV2", reply_markup: roleMenu(existing.role) },
+        `Selamat datang kembali, *${firstName}*! Kamu terdaftar sebagai *${roleName(existing.role)}*.`,
+        { parse_mode: "Markdown", reply_markup: roleMenu(existing.role) },
       );
       return;
     }
 
     await bot.sendMessage(
       chatId,
-      `👋 Welcome to the *Delivery Bot*, ${firstName}\\!\n\nPlease choose your role:`,
-      { parse_mode: "MarkdownV2", reply_markup: roleKeyboard() },
+      `👋 Halo *${firstName}*! Selamat datang di bot pemesanan.\n\nSilakan pilih peranmu:`,
+      { parse_mode: "Markdown", reply_markup: roleKeyboard() },
     );
   });
 
-  async function registerRole(
-    msg: TelegramBot.Message,
-    role: Role,
-  ): Promise<void> {
+  function roleName(role: Role): string {
+    if (role === "customer") return "Customer";
+    if (role === "seller") return "Seller";
+    return "Driver";
+  }
+
+  // ─── Pilih Role ────────────────────────────────────────────────────────────
+  bot.onText(/^👤 Customer$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
     const existing = store.getUser(userId);
-
     if (existing) {
-      await bot.sendMessage(
-        chatId,
-        `You already have the *${existing.role}* role\\.`,
-        { parse_mode: "MarkdownV2" },
-      );
+      await bot.sendMessage(chatId, `Kamu sudah terdaftar sebagai *${roleName(existing.role)}*.`, {
+        parse_mode: "Markdown",
+        reply_markup: roleMenu(existing.role),
+      });
       return;
     }
-
-    const username =
-      msg.from!.username ?? msg.from!.first_name ?? String(userId);
-    store.registerUser(userId, username, role);
-    logger.info({ userId, role }, "User registered");
-
-    await bot.sendMessage(chatId, `✅ Registered as *${role}*\\!`, {
-      parse_mode: "MarkdownV2",
-      reply_markup: roleMenu(role),
+    const username = msg.from!.username ?? msg.from!.first_name ?? String(userId);
+    store.registerUser(userId, username, "customer");
+    logger.info({ userId, role: "customer" }, "User registered");
+    await bot.sendMessage(chatId, `✅ Kamu berhasil masuk sebagai *Customer*!`, {
+      parse_mode: "Markdown",
+      reply_markup: customerKeyboard(),
     });
-  }
+  });
 
-  bot.onText(/^👤 Customer$/, (msg) => registerRole(msg, "customer"));
-  bot.onText(/^🏪 Seller$/, (msg) => registerRole(msg, "seller"));
-  bot.onText(/^🚗 Driver$/, (msg) => registerRole(msg, "driver"));
-
-  async function requireRole(
-    chatId: number,
-    userId: number,
-    role: Role,
-  ): Promise<boolean> {
-    const user = store.getUser(userId);
-    if (!user) {
-      await bot.sendMessage(chatId, "Please use /start to register first.");
-      return false;
-    }
-    if (user.role !== role) {
-      await bot.sendMessage(
-        chatId,
-        `This action is only available to *${role}s*\\.`,
-        { parse_mode: "MarkdownV2" },
-      );
-      return false;
-    }
-    return true;
-  }
-
-  bot.onText(/^\/admin$/, async (msg) => {
+  bot.onText(/^🏪 Seller$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
-    if (!isAdmin(userId)) {
+    const existing = store.getUser(userId);
+    if (existing) {
+      await bot.sendMessage(chatId, `Kamu sudah terdaftar sebagai *${roleName(existing.role)}*.`, {
+        parse_mode: "Markdown",
+        reply_markup: roleMenu(existing.role),
+      });
+      return;
+    }
+    roleAuthState.setPending(userId, "seller");
+    await bot.sendMessage(chatId, `🔐 Masukkan password untuk masuk sebagai *Seller*:`, {
+      parse_mode: "Markdown",
+    });
+  });
+
+  bot.onText(/^🚗 Driver$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    const existing = store.getUser(userId);
+    if (existing) {
+      await bot.sendMessage(chatId, `Kamu sudah terdaftar sebagai *${roleName(existing.role)}*.`, {
+        parse_mode: "Markdown",
+        reply_markup: roleMenu(existing.role),
+      });
+      return;
+    }
+    roleAuthState.setPending(userId, "driver");
+    await bot.sendMessage(chatId, `🔐 Masukkan password untuk masuk sebagai *Driver*:`, {
+      parse_mode: "Markdown",
+    });
+  });
+
+  // ─── /admin ────────────────────────────────────────────────────────────────
+  bot.onText(/^\/admin$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(msg.from!.id)) {
       await bot.sendMessage(chatId, "⛔ Kamu tidak memiliki akses admin.");
       return;
     }
-    await bot.sendMessage(
-      chatId,
-      `🛠 *Panel Admin*\n\nSelamat datang di panel admin\\. Pilih aksi:`,
-      { parse_mode: "MarkdownV2", reply_markup: adminKeyboard() },
-    );
+    await bot.sendMessage(chatId, `🛠 *Panel Admin*\n\nPilih aksi:`, {
+      parse_mode: "Markdown",
+      reply_markup: adminKeyboard(),
+    });
   });
 
   async function startBroadcast(
@@ -229,10 +324,7 @@ export function startBot(): TelegramBot | null {
     label: string,
   ): Promise<void> {
     const chatId = msg.chat.id;
-    if (!isAdmin(msg.from!.id)) {
-      await bot.sendMessage(chatId, "⛔ Kamu tidak memiliki akses admin.");
-      return;
-    }
+    if (!isAdmin(msg.from!.id)) return;
     broadcastState.setPending(msg.from!.id, target);
     await bot.sendMessage(
       chatId,
@@ -248,8 +340,13 @@ export function startBot(): TelegramBot | null {
 
   bot.onText(/^\/cancel$/, async (msg) => {
     const chatId = msg.chat.id;
-    broadcastState.clearPending(msg.from!.id);
-    await bot.sendMessage(chatId, "❌ Aksi dibatalkan.");
+    const userId = msg.from!.id;
+    broadcastState.clearPending(userId);
+    menuEditState.clear(userId);
+    customOrderState.clear(userId);
+    await bot.sendMessage(chatId, "❌ Aksi dibatalkan.", {
+      reply_markup: store.getUser(userId) ? roleMenu(store.getUser(userId)!.role) : roleKeyboard(),
+    });
   });
 
   bot.onText(/^👥 Daftar User$/, async (msg) => {
@@ -274,16 +371,15 @@ export function startBot(): TelegramBot | null {
     const customers = store.getUsersByRole("customer").length;
     const sellers = store.getUsersByRole("seller").length;
     const drivers = store.getUsersByRole("driver").length;
-    // Count orders via all customers
     const customerUsers = store.getUsersByRole("customer");
     let totalOrders = 0, pending = 0, delivered = 0, cancelled = 0, onTheWay = 0;
     for (const u of customerUsers) {
-      const orders = store.getOrdersByCustomer(u.telegramId);
-      totalOrders += orders.length;
-      pending += orders.filter((o) => o.status === "pending").length;
-      delivered += orders.filter((o) => o.status === "delivered").length;
-      cancelled += orders.filter((o) => o.status === "cancelled").length;
-      onTheWay += orders.filter((o) => o.status === "picked_up").length;
+      const ords = store.getOrdersByCustomer(u.telegramId);
+      totalOrders += ords.length;
+      pending += ords.filter((o) => o.status === "pending").length;
+      delivered += ords.filter((o) => o.status === "delivered").length;
+      cancelled += ords.filter((o) => o.status === "cancelled").length;
+      onTheWay += ords.filter((o) => o.status === "picked_up").length;
     }
     const text =
       `📈 *Statistik Global Bot*\n\n` +
@@ -299,19 +395,17 @@ export function startBot(): TelegramBot | null {
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
+  // ─── Riwayat ────────────────────────────────────────────────────────────────
   bot.onText(/^🕒 Riwayat$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
     const user = store.getUser(userId);
-
     if (!user) {
       await bot.sendMessage(chatId, "Silakan gunakan /start untuk mendaftar terlebih dahulu.");
       return;
     }
-
     let history: ReturnType<typeof store.getHistoryByCustomer> = [];
     let title = "";
-
     if (user.role === "customer") {
       history = store.getHistoryByCustomer(userId);
       title = "📋 *Riwayat Pesanan Kamu*";
@@ -322,44 +416,38 @@ export function startBot(): TelegramBot | null {
       history = store.getHistoryByDriver(userId);
       title = "📋 *Riwayat Pengiriman Kamu*";
     }
-
     if (history.length === 0) {
       await bot.sendMessage(chatId, "Belum ada riwayat pesanan.", { parse_mode: "Markdown" });
       return;
     }
-
     const BATCH = 5;
-    await bot.sendMessage(chatId, `${title}\n_Menampilkan ${Math.min(history.length, BATCH * 2)} pesanan terbaru, diurutkan dari yang terbaru._`, {
-      parse_mode: "Markdown",
-    });
-
+    await bot.sendMessage(
+      chatId,
+      `${title}\n_Menampilkan ${Math.min(history.length, BATCH * 2)} pesanan terbaru._`,
+      { parse_mode: "Markdown" },
+    );
     const toShow = history.slice(0, BATCH * 2);
     const chunks: typeof toShow[] = [];
     for (let i = 0; i < toShow.length; i += BATCH) chunks.push(toShow.slice(i, i + BATCH));
-
     for (const chunk of chunks) {
       const text = chunk.map(formatOrder).join("\n\n─────────────\n\n");
       await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
     }
   });
 
+  // ─── Statistik ─────────────────────────────────────────────────────────────
   bot.onText(/^📊 Statistik$/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from!.id;
     const user = store.getUser(userId);
-
     if (!user) {
       await bot.sendMessage(chatId, "Silakan gunakan /start untuk mendaftar terlebih dahulu.");
       return;
     }
-
     let text = "";
-
     if (user.role === "customer") {
       const s = store.getStatsCustomer(userId);
-      const successRate = s.total > 0
-        ? Math.round((s.delivered / s.total) * 100)
-        : 0;
+      const successRate = s.total > 0 ? Math.round((s.delivered / s.total) * 100) : 0;
       text =
         `📊 *Statistik Kamu*\n\n` +
         `📦 Total Pesanan: *${s.total}*\n` +
@@ -371,9 +459,8 @@ export function startBot(): TelegramBot | null {
         `🏆 Tingkat Keberhasilan: *${successRate}%*`;
     } else if (user.role === "seller") {
       const s = store.getStatsSeller(userId);
-      const successRate = s.totalAccepted > 0
-        ? Math.round((s.delivered / s.totalAccepted) * 100)
-        : 0;
+      const successRate =
+        s.totalAccepted > 0 ? Math.round((s.delivered / s.totalAccepted) * 100) : 0;
       text =
         `📊 *Statistik Seller*\n\n` +
         `📥 Pesanan Masuk (Pending): *${s.pendingIncoming}*\n` +
@@ -384,12 +471,12 @@ export function startBot(): TelegramBot | null {
         `🏆 Tingkat Penyelesaian: *${successRate}%*`;
     } else {
       const s = store.getStatsDriver(userId);
-      const successRate = s.totalClaimed > 0
-        ? Math.round((s.delivered / s.totalClaimed) * 100)
-        : 0;
-      const ratingLine = s.avgRating !== null
-        ? `⭐ Rating Rata-rata: *${s.avgRating.toFixed(1)}/5* (${s.totalRatings} ulasan)\n`
-        : `⭐ Rating Rata-rata: *Belum ada*\n`;
+      const successRate =
+        s.totalClaimed > 0 ? Math.round((s.delivered / s.totalClaimed) * 100) : 0;
+      const ratingLine =
+        s.avgRating !== null
+          ? `⭐ Rating Rata-rata: *${s.avgRating.toFixed(1)}/5* (${s.totalRatings} ulasan)\n`
+          : `⭐ Rating Rata-rata: *Belum ada*\n`;
       text =
         `📊 *Statistik Driver*\n\n` +
         `🚚 Tersedia Sekarang: *${s.available}*\n` +
@@ -399,27 +486,56 @@ export function startBot(): TelegramBot | null {
         ratingLine +
         `\n🏆 Tingkat Keberhasilan: *${successRate}%*`;
     }
-
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
-  bot.onText(/^❌ Cancel Order$/, async (msg) => {
+  // ─── Customer: Pesan Baru (catalog menu) ──────────────────────────────────
+  bot.onText(/^🛍 Pesan Baru$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "customer") {
+      await bot.sendMessage(chatId, "Menu ini hanya untuk customer.");
+      return;
+    }
+    const menuText = menuStore.formatMenuText();
+    await bot.sendMessage(
+      chatId,
+      `📋 *DAFTAR MENU*\n\n${menuText}\n\n─────────────\nPilih kategori pesananmu:`,
+      { parse_mode: "Markdown", reply_markup: menuCategoryKeyboard() },
+    );
+  });
 
+  // ─── Customer: Lihat Keranjang ─────────────────────────────────────────────
+  bot.onText(/^🛒 Keranjang$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from!.id;
+    if (!store.getUser(userId) || store.getUser(userId)!.role !== "customer") return;
+    const summary = cartState.formatSummary(userId);
+    const count = cartState.count(userId);
+    await bot.sendMessage(
+      chatId,
+      `🛒 *Keranjang Kamu*\n\n${summary}`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: count > 0 ? cartKeyboard() : undefined,
+      },
+    );
+  });
+
+  // ─── Customer: Batalkan Pesanan ────────────────────────────────────────────
+  bot.onText(/^❌ Batalkan Pesanan$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "customer") return;
     const myOrders = store.getOrdersByCustomer(msg.from!.id).filter(
       (o) => o.status === "pending" || o.status === "accepted",
     );
-
     if (myOrders.length === 0) {
       await bot.sendMessage(
         chatId,
-        "Tidak ada pesanan yang bisa dibatalkan\\.\n\n_Pesanan hanya bisa dibatalkan sebelum diambil driver\\._",
-        { parse_mode: "MarkdownV2" },
+        "Tidak ada pesanan yang bisa dibatalkan.\n\n_Pesanan hanya bisa dibatalkan sebelum diambil driver._",
+        { parse_mode: "Markdown" },
       );
       return;
     }
-
     await bot.sendMessage(chatId, "Pilih pesanan yang ingin dibatalkan:");
     for (const order of myOrders) {
       await bot.sendMessage(chatId, formatOrder(order), {
@@ -433,65 +549,18 @@ export function startBot(): TelegramBot | null {
     }
   });
 
-  bot.onText(/^📦 New Order$/, async (msg) => {
+  // ─── Customer: Pesanan Saya ────────────────────────────────────────────────
+  bot.onText(/^📋 Pesanan Saya$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
-    await bot.sendMessage(
-      chatId,
-      "Please send your order description\\.\nFormat: `/neworder <description>`\n\nExample: `/neworder 2x Pizza Margherita`",
-      { parse_mode: "MarkdownV2" },
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "customer") return;
+    const myOrders = store.getOrdersByCustomer(msg.from!.id).filter(
+      (o) => o.status !== "delivered" && o.status !== "cancelled",
     );
-  });
-
-  bot.onText(/^\/neworder (.+)$/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
-    const description = match?.[1]?.trim();
-    if (!description) {
-      await bot.sendMessage(
-        chatId,
-        "Please provide an order description\\.\nExample: `/neworder 2x Pizza Margherita`",
-        { parse_mode: "MarkdownV2" },
-      );
-      return;
-    }
-    const order = store.createOrder(msg.from!.id, description);
-    logger.info({ orderId: order.id, customerId: msg.from!.id }, "Order created");
-    await bot.sendMessage(
-      chatId,
-      `✅ Order *#${order.id}* placed\\!\n📝 ${escapeMarkdown(description)}\n\nWaiting for a seller to accept your order\\.`,
-      { parse_mode: "MarkdownV2" },
-    );
-
-    // Notifikasi semua seller
-    const sellers = store.getUsersByRole("seller");
-    for (const seller of sellers) {
-      await notify(
-        seller.telegramId,
-        `🔔 *Pesanan Baru #${order.id}*\n📝 ${description}\n\nBuka *📥 Incoming Orders* untuk menerima pesanan ini.`,
-      );
-    }
-  });
-
-  bot.onText(/^\/neworder$/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
-    await bot.sendMessage(
-      chatId,
-      "Please provide an order description\\.\nExample: `/neworder 2x Pizza Margherita`",
-      { parse_mode: "MarkdownV2" },
-    );
-  });
-
-  bot.onText(/^📋 My Orders$/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "customer"))) return;
-    const myOrders = store.getOrdersByCustomer(msg.from!.id);
     if (myOrders.length === 0) {
       await bot.sendMessage(
         chatId,
-        "You have no orders yet\\. Tap *📦 New Order* to place one\\.",
-        { parse_mode: "MarkdownV2" },
+        "Tidak ada pesanan aktif. Tap *🛍 Pesan Baru* untuk memesan.",
+        { parse_mode: "Markdown" },
       );
       return;
     }
@@ -499,16 +568,13 @@ export function startBot(): TelegramBot | null {
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
-  bot.onText(/^📥 Incoming Orders$/, async (msg) => {
+  // ─── Seller: Pesanan Masuk ─────────────────────────────────────────────────
+  bot.onText(/^📥 Pesanan Masuk$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "seller"))) return;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "seller") return;
     const pending = store.getPendingOrders();
     if (pending.length === 0) {
-      await bot.sendMessage(
-        chatId,
-        "No pending orders at the moment\\. Check back soon\\!",
-        { parse_mode: "MarkdownV2" },
-      );
+      await bot.sendMessage(chatId, "Belum ada pesanan masuk. Pantau terus!");
       return;
     }
     for (const order of pending) {
@@ -516,35 +582,62 @@ export function startBot(): TelegramBot | null {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "✅ Accept Order", callback_data: `accept_order:${order.id}` }],
+            [{ text: "✅ Terima Pesanan", callback_data: `accept_order:${order.id}` }],
           ],
         },
       });
     }
   });
 
-  bot.onText(/^📋 Accepted Orders$/, async (msg) => {
+  // ─── Seller: Pesanan Diterima ──────────────────────────────────────────────
+  bot.onText(/^📋 Pesanan Diterima$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "seller"))) return;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "seller") return;
     const myOrders = store.getOrdersBySeller(msg.from!.id);
     if (myOrders.length === 0) {
-      await bot.sendMessage(chatId, "You have no accepted orders yet.");
+      await bot.sendMessage(chatId, "Belum ada pesanan yang diterima.");
       return;
     }
     const text = myOrders.map(formatOrder).join("\n\n─────────────\n\n");
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 
-  bot.onText(/^🚚 Available Deliveries$/, async (msg) => {
+  // ─── Seller: Kelola Menu ───────────────────────────────────────────────────
+  bot.onText(/^✏️ Kelola Menu$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "driver"))) return;
+    const userId = msg.from!.id;
+    if (!store.getUser(userId) || store.getUser(userId)!.role !== "seller") return;
+    await sendMenuManagement(chatId);
+  });
+
+  async function sendMenuManagement(chatId: number): Promise<void> {
+    const menuText = menuStore.formatMenuText();
+    await bot.sendMessage(
+      chatId,
+      `✏️ *Kelola Menu*\n\n${menuText}\n\n─────────────\nGunakan tombol di bawah untuk mengelola menu:`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "➕ Tambah Item Baru", callback_data: "menu_add" }],
+            [
+              { text: "✏️ Edit Harga Item", callback_data: "menu_edit_price" },
+              { text: "🗑 Hapus Item", callback_data: "menu_delete" },
+            ],
+            [{ text: "🔄 Aktif/Non-aktif Item", callback_data: "menu_toggle" }],
+          ],
+        },
+      },
+    );
+  }
+
+  // ─── Driver: Pengiriman Tersedia ───────────────────────────────────────────
+  bot.onText(/^🚚 Pengiriman Tersedia$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "driver") return;
     const available = store.getAcceptedUnassignedOrders();
     if (available.length === 0) {
-      await bot.sendMessage(
-        chatId,
-        "No deliveries available right now\\. Check back soon\\!",
-        { parse_mode: "MarkdownV2" },
-      );
+      await bot.sendMessage(chatId, "Belum ada pengiriman tersedia. Cek lagi nanti!");
       return;
     }
     for (const order of available) {
@@ -552,22 +645,23 @@ export function startBot(): TelegramBot | null {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🚗 Claim Delivery", callback_data: `claim_order:${order.id}` }],
+            [{ text: "🚗 Ambil Pengiriman", callback_data: `claim_order:${order.id}` }],
           ],
         },
       });
     }
   });
 
-  bot.onText(/^📋 My Deliveries$/, async (msg) => {
+  // ─── Driver: Pengiriman Saya ───────────────────────────────────────────────
+  bot.onText(/^📋 Pengiriman Saya$/, async (msg) => {
     const chatId = msg.chat.id;
-    if (!(await requireRole(chatId, msg.from!.id, "driver"))) return;
+    if (!store.getUser(msg.from!.id) || store.getUser(msg.from!.id)!.role !== "driver") return;
     const deliveries = store.getOrdersByDriver(msg.from!.id);
     if (deliveries.length === 0) {
       await bot.sendMessage(
         chatId,
-        "You have no active deliveries\\. Claim one via *🚚 Available Deliveries*\\.",
-        { parse_mode: "MarkdownV2" },
+        "Belum ada pengiriman. Ambil via *🚚 Pengiriman Tersedia*.",
+        { parse_mode: "Markdown" },
       );
       return;
     }
@@ -576,7 +670,7 @@ export function startBot(): TelegramBot | null {
       if (order.status === "picked_up") {
         opts.reply_markup = {
           inline_keyboard: [
-            [{ text: "📦 Mark Delivered", callback_data: `deliver_order:${order.id}` }],
+            [{ text: "📦 Tandai Sudah Dikirim", callback_data: `deliver_order:${order.id}` }],
           ],
         };
       }
@@ -584,51 +678,517 @@ export function startBot(): TelegramBot | null {
     }
   });
 
-  // Intercept pesan biasa untuk broadcast admin
+  // ─── Message handler (password, broadcast, menu edit, custom order) ────────
   bot.on("message", async (msg) => {
-    if (!msg.text || msg.text.startsWith("/") || !msg.from) return;
+    if (!msg.text || !msg.from) return;
     const userId = msg.from.id;
-    if (!isAdmin(userId)) return;
-    const pending = broadcastState.getPending(userId);
-    if (!pending) return;
-    // Cek bukan tombol menu admin
-    const adminButtons = [
-      "📢 Broadcast Semua", "📢 ke Customer", "📢 ke Seller", "📢 ke Driver",
-      "👥 Daftar User", "📈 Statistik Global",
-    ];
-    if (adminButtons.includes(msg.text)) return;
-    broadcastState.clearPending(userId);
-    await bot.sendMessage(msg.chat.id, `⏳ Mengirim broadcast...`);
-    await doBroadcast(pending, msg.text, msg.chat.id);
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    // Abaikan command
+    if (text.startsWith("/")) return;
+
+    // ── 1. Verifikasi password role ──────────────────────────────────────────
+    const pendingRole = roleAuthState.getPending(userId);
+    if (pendingRole) {
+      const skipTexts = ["👤 Customer", "🏪 Seller", "🚗 Driver"];
+      if (skipTexts.includes(text)) return;
+      roleAuthState.clearPending(userId);
+      const correctPassword =
+        pendingRole === "seller" ? SELLER_PASSWORD : DRIVER_PASSWORD;
+      if (text !== correctPassword) {
+        await bot.sendMessage(
+          chatId,
+          `❌ Password salah. Silakan tekan /start dan coba lagi.`,
+        );
+        return;
+      }
+      const username = msg.from.username ?? msg.from.first_name ?? String(userId);
+      store.registerUser(userId, username, pendingRole);
+      logger.info({ userId, role: pendingRole }, "User registered via password");
+      await bot.sendMessage(
+        chatId,
+        `✅ Password benar! Kamu berhasil masuk sebagai *${roleName(pendingRole)}*.`,
+        { parse_mode: "Markdown", reply_markup: roleMenu(pendingRole) },
+      );
+      return;
+    }
+
+    // ── 2. Custom order (pesanan lainnya) ────────────────────────────────────
+    if (customOrderState.has(userId)) {
+      const skipCustom = [
+        "🛍 Pesan Baru", "📋 Pesanan Saya", "🛒 Keranjang", "❌ Batalkan Pesanan",
+        "🕒 Riwayat", "📊 Statistik",
+      ];
+      if (skipCustom.includes(text)) return;
+      customOrderState.clear(userId);
+      const order = store.createOrder(userId, text);
+      logger.info({ orderId: order.id, customerId: userId }, "Custom order created");
+      await bot.sendMessage(
+        chatId,
+        `✅ Pesanan *#${order.id}* berhasil dibuat!\n📝 ${text}\n\nMenunggu seller menerima pesananmu.`,
+        { parse_mode: "Markdown" },
+      );
+      const sellers = store.getUsersByRole("seller");
+      for (const seller of sellers) {
+        await notify(
+          seller.telegramId,
+          `🔔 *Pesanan Baru #${order.id}*\n📝 ${text}\n\nBuka *📥 Pesanan Masuk* untuk menerima.`,
+        );
+      }
+      return;
+    }
+
+    // ── 3. Menu edit flow (seller) ───────────────────────────────────────────
+    const editState = menuEditState.get(userId);
+    if (editState) {
+      const skipEdit = ["📥 Pesanan Masuk", "📋 Pesanan Diterima", "✏️ Kelola Menu", "🕒 Riwayat", "📊 Statistik"];
+      if (skipEdit.includes(text)) return;
+
+      if (editState.phase === "add_name") {
+        menuEditState.set(userId, { phase: "add_category", name: text });
+        await bot.sendMessage(chatId, `Pilih kategori untuk *${text}*:`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "🍱 Makanan", callback_data: "add_menu_cat:makanan" },
+                { text: "🥤 Minuman", callback_data: "add_menu_cat:minuman" },
+              ],
+            ],
+          },
+        });
+        return;
+      }
+
+      if (editState.phase === "add_price") {
+        const price = parseInt(text.replace(/\D/g, ""), 10);
+        if (isNaN(price) || price < 0) {
+          await bot.sendMessage(chatId, "Harga tidak valid. Masukkan angka, contoh: 15000");
+          return;
+        }
+        const item = menuStore.addItem(editState.category, editState.name, price);
+        menuEditState.clear(userId);
+        const priceLabel = price > 0 ? formatRupiah(price) : "Harga menyusul";
+        await bot.sendMessage(
+          chatId,
+          `✅ Item *${item.name}* (${priceLabel}) berhasil ditambahkan!\n\nID item: *${item.id}*`,
+          { parse_mode: "Markdown" },
+        );
+        await sendMenuManagement(chatId);
+        return;
+      }
+
+      if (editState.phase === "edit_price") {
+        // Mode hapus item
+        if (editState.itemName === "__delete__") {
+          const id = parseInt(text, 10);
+          const item = menuStore.getById(id);
+          if (!item) { await bot.sendMessage(chatId, `ID ${id} tidak ditemukan. Coba lagi.`); return; }
+          menuStore.deleteItem(id);
+          menuEditState.clear(userId);
+          await bot.sendMessage(chatId, `🗑 Item *${item.name}* berhasil dihapus.`, { parse_mode: "Markdown" });
+          await sendMenuManagement(chatId);
+          return;
+        }
+        // Mode toggle item
+        if (editState.itemName === "__toggle__") {
+          const id = parseInt(text, 10);
+          const item = menuStore.getById(id);
+          if (!item) { await bot.sendMessage(chatId, `ID ${id} tidak ditemukan. Coba lagi.`); return; }
+          const updated = menuStore.toggleAvailable(id);
+          menuEditState.clear(userId);
+          await bot.sendMessage(chatId, `${updated?.available ? "✅ Aktif" : "⏸ Non-aktif"}: *${item.name}*`, { parse_mode: "Markdown" });
+          await sendMenuManagement(chatId);
+          return;
+        }
+        // Mode edit harga — pertama tangkap ID (itemId === 0 = belum pilih)
+        if (editState.itemId === 0) {
+          const id = parseInt(text, 10);
+          const item = menuStore.getById(id);
+          if (!item) { await bot.sendMessage(chatId, `ID ${id} tidak ditemukan. Ketik ID yang valid.`); return; }
+          menuEditState.set(userId, { phase: "edit_price", itemId: id, itemName: item.name });
+          await bot.sendMessage(chatId, `✏️ Ketik harga baru untuk *${item.name}* (contoh: 25000):`, { parse_mode: "Markdown" });
+          return;
+        }
+        // Sudah ada itemId — ini input harga baru
+        const price = parseInt(text.replace(/\D/g, ""), 10);
+        if (isNaN(price) || price < 0) {
+          await bot.sendMessage(chatId, "Harga tidak valid. Masukkan angka, contoh: 20000");
+          return;
+        }
+        menuStore.updatePrice(editState.itemId, price);
+        menuEditState.clear(userId);
+        const priceLabel = price > 0 ? formatRupiah(price) : "Harga menyusul";
+        await bot.sendMessage(
+          chatId,
+          `✅ Harga *${editState.itemName}* berhasil diubah menjadi *${priceLabel}*.`,
+          { parse_mode: "Markdown" },
+        );
+        await sendMenuManagement(chatId);
+        return;
+      }
+
+      if (editState.phase === "add_category") {
+        return;
+      }
+    }
+
+    // ── 4. Broadcast admin ───────────────────────────────────────────────────
+    if (isAdmin(userId)) {
+      const pending = broadcastState.getPending(userId);
+      if (pending) {
+        const adminButtons = [
+          "📢 Broadcast Semua", "📢 ke Customer", "📢 ke Seller", "📢 ke Driver",
+          "👥 Daftar User", "📈 Statistik Global",
+        ];
+        if (adminButtons.includes(text)) return;
+        broadcastState.clearPending(userId);
+        await bot.sendMessage(chatId, `⏳ Mengirim broadcast...`);
+        await doBroadcast(pending, text, chatId);
+        return;
+      }
+    }
   });
 
+  // ─── Callback query handler ────────────────────────────────────────────────
   bot.on("callback_query", async (query) => {
     const chatId = query.message!.chat.id;
     const userId = query.from.id;
     const data = query.data ?? "";
 
-    const cancelMatch = data.match(/^cancel_order:(\d+)$/);
-    const acceptMatch = data.match(/^accept_order:(\d+)$/);
-    const claimMatch = data.match(/^claim_order:(\d+)$/);
-    const deliverMatch = data.match(/^deliver_order:(\d+)$/);
-    const rateMatch = data.match(/^rate_order:(\d+):([1-5])$/);
+    // ── Catalog: pilih kategori ──────────────────────────────────────────────
+    if (data === "menu_back") {
+      await bot.answerCallbackQuery(query.id);
+      const menuText = menuStore.formatMenuText();
+      await bot.sendMessage(
+        chatId,
+        `📋 *DAFTAR MENU*\n\n${menuText}\n\n─────────────\nPilih kategori pesananmu:`,
+        { parse_mode: "Markdown", reply_markup: menuCategoryKeyboard() },
+      );
+      return;
+    }
 
+    const catMatch = data.match(/^menu_cat:(makanan|minuman)$/);
+    if (catMatch) {
+      await bot.answerCallbackQuery(query.id);
+      const cat = catMatch[1] as "makanan" | "minuman";
+      const label = cat === "makanan" ? "🍱 Makanan" : "🥤 Minuman";
+      await bot.sendMessage(
+        chatId,
+        `${label} — Tap item untuk menambahkan ke keranjang:`,
+        { reply_markup: menuItemsKeyboard(cat, userId) },
+      );
+      return;
+    }
+
+    if (data === "menu_custom") {
+      await bot.answerCallbackQuery(query.id);
+      customOrderState.set(userId);
+      await bot.sendMessage(
+        chatId,
+        `📝 *Pesanan Lainnya*\n\nKetikkan pesananmu secara bebas.\nContoh: "1 porsi nasi goreng extra pedas"\n\nKirim /cancel untuk membatalkan.`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    // ── Cart: tambah item ────────────────────────────────────────────────────
+    const cartAddMatch = data.match(/^cart_add:(\d+)$/);
+    if (cartAddMatch) {
+      const itemId = parseInt(cartAddMatch[1]!, 10);
+      const item = menuStore.getById(itemId);
+      if (!item) {
+        await bot.answerCallbackQuery(query.id, { text: "Item tidak ditemukan.", show_alert: true });
+        return;
+      }
+      cartState.addItem(userId, item);
+      const count = cartState.count(userId);
+      const total = cartState.total(userId);
+      await bot.answerCallbackQuery(query.id, {
+        text: `✅ ${item.name} ditambahkan!\nKeranjang: ${count} item · ${formatRupiah(total)}`,
+      });
+      // Update tombol keranjang di pesan
+      const cat = item.category;
+      try {
+        await bot.editMessageReplyMarkup(menuItemsKeyboard(cat, userId), {
+          chat_id: chatId,
+          message_id: query.message!.message_id,
+        });
+      } catch {
+        // Abaikan jika tidak bisa update
+      }
+      return;
+    }
+
+    // ── Cart: lihat keranjang ────────────────────────────────────────────────
+    if (data === "cart_view") {
+      await bot.answerCallbackQuery(query.id);
+      const summary = cartState.formatSummary(userId);
+      const count = cartState.count(userId);
+      await bot.sendMessage(
+        chatId,
+        `🛒 *Keranjang Kamu*\n\n${summary}`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: count > 0 ? cartKeyboard() : undefined,
+        },
+      );
+      return;
+    }
+
+    // ── Cart: kosongkan ──────────────────────────────────────────────────────
+    if (data === "cart_clear") {
+      cartState.clear(userId);
+      await bot.answerCallbackQuery(query.id, { text: "🗑 Keranjang dikosongkan." });
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [[{ text: "🔙 Kembali ke Menu", callback_data: "menu_back" }]] },
+        { chat_id: chatId, message_id: query.message!.message_id },
+      );
+      return;
+    }
+
+    // ── Cart: konfirmasi & buat pesanan ─────────────────────────────────────
+    if (data === "cart_confirm") {
+      await bot.answerCallbackQuery(query.id);
+      const items = cartState.get(userId);
+      if (items.length === 0) {
+        await bot.sendMessage(chatId, "Keranjang kamu kosong. Pilih menu terlebih dahulu.");
+        return;
+      }
+      const description = cartState.buildDescription(userId);
+      const total = cartState.total(userId);
+      cartState.clear(userId);
+      const order = store.createOrder(userId, description);
+      logger.info({ orderId: order.id, customerId: userId }, "Order created from cart");
+      await bot.sendMessage(
+        chatId,
+        `✅ Pesanan *#${order.id}* berhasil dibuat!\n\n📝 ${description}\n💰 Total: *${formatRupiah(total)}*\n\nMenunggu seller menerima pesananmu.`,
+        { parse_mode: "Markdown" },
+      );
+      const sellers = store.getUsersByRole("seller");
+      for (const seller of sellers) {
+        await notify(
+          seller.telegramId,
+          `🔔 *Pesanan Baru #${order.id}*\n📝 ${description}\n💰 Total: ${formatRupiah(total)}\n\nBuka *📥 Pesanan Masuk* untuk menerima.`,
+        );
+      }
+      return;
+    }
+
+    // ── Seller: kelola menu ──────────────────────────────────────────────────
+    if (data === "menu_add") {
+      await bot.answerCallbackQuery(query.id);
+      menuEditState.set(userId, { phase: "add_name" });
+      await bot.sendMessage(chatId, `➕ *Tambah Item Baru*\n\nKetik nama item baru:\n(Kirim /cancel untuk batal)`, {
+        parse_mode: "Markdown",
+      });
+      return;
+    }
+
+    if (data === "menu_edit_price") {
+      await bot.answerCallbackQuery(query.id);
+      const menuText = menuStore.formatMenuText();
+      await bot.sendMessage(
+        chatId,
+        `✏️ *Edit Harga Item*\n\n${menuText}\n\n─────────────\nKetik *ID item* yang ingin diubah harganya:`,
+        { parse_mode: "Markdown" },
+      );
+      menuEditState.set(userId, { phase: "edit_price", itemId: 0, itemName: "_pilih item_" });
+      return;
+    }
+
+    if (data === "menu_delete") {
+      await bot.answerCallbackQuery(query.id);
+      const menuText = menuStore.formatMenuText();
+      await bot.sendMessage(
+        chatId,
+        `🗑 *Hapus Item*\n\n${menuText}\n\n─────────────\nKetik *ID item* yang ingin dihapus:`,
+        { parse_mode: "Markdown" },
+      );
+      menuEditState.set(userId, { phase: "edit_price", itemId: -1, itemName: "__delete__" });
+      return;
+    }
+
+    if (data === "menu_toggle") {
+      await bot.answerCallbackQuery(query.id);
+      const menuText = menuStore.formatMenuText();
+      await bot.sendMessage(
+        chatId,
+        `🔄 *Aktif/Non-aktif Item*\n\n${menuText}\n\n─────────────\nKetik *ID item* yang ingin di-toggle:`,
+        { parse_mode: "Markdown" },
+      );
+      menuEditState.set(userId, { phase: "edit_price", itemId: -2, itemName: "__toggle__" });
+      return;
+    }
+
+    const addMenuCatMatch = data.match(/^add_menu_cat:(makanan|minuman)$/);
+    if (addMenuCatMatch) {
+      await bot.answerCallbackQuery(query.id);
+      const cat = addMenuCatMatch[1] as "makanan" | "minuman";
+      const current = menuEditState.get(userId);
+      if (!current || current.phase !== "add_category") return;
+      menuEditState.set(userId, { phase: "add_price", name: current.name, category: cat });
+      await bot.sendMessage(
+        chatId,
+        `💰 Ketik harga untuk *${current.name}* (dalam rupiah, contoh: 15000).\nMasukkan 0 jika harga menyusul:`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    // ── Tangani ID untuk edit/delete/toggle (via message handler override) ───
+    // Kita gunakan inline keyboard khusus per item untuk delete dan toggle
+    const menuItemEditMatch = data.match(/^mitem_(edit|del|toggle):(\d+)$/);
+    if (menuItemEditMatch) {
+      const action = menuItemEditMatch[1]!;
+      const itemId = parseInt(menuItemEditMatch[2]!, 10);
+      const item = menuStore.getById(itemId);
+      if (!item) {
+        await bot.answerCallbackQuery(query.id, { text: "Item tidak ditemukan.", show_alert: true });
+        return;
+      }
+      if (action === "del") {
+        menuStore.deleteItem(itemId);
+        await bot.answerCallbackQuery(query.id, { text: `🗑 ${item.name} dihapus.` });
+        await sendMenuManagement(chatId);
+        return;
+      }
+      if (action === "toggle") {
+        const updated = menuStore.toggleAvailable(itemId);
+        const label = updated?.available ? "✅ Aktif" : "⏸ Non-aktif";
+        await bot.answerCallbackQuery(query.id, { text: `${label}: ${item.name}` });
+        await sendMenuManagement(chatId);
+        return;
+      }
+      if (action === "edit") {
+        menuEditState.set(userId, { phase: "edit_price", itemId, itemName: item.name });
+        await bot.answerCallbackQuery(query.id);
+        await bot.sendMessage(
+          chatId,
+          `✏️ Ketik harga baru untuk *${item.name}* (contoh: 25000):`,
+          { parse_mode: "Markdown" },
+        );
+        return;
+      }
+    }
+
+    // ── Seller: terima pesanan ───────────────────────────────────────────────
+    const acceptMatch = data.match(/^accept_order:(\d+)$/);
+    if (acceptMatch) {
+      const user = store.getUser(userId);
+      if (!user || user.role !== "seller") {
+        await bot.answerCallbackQuery(query.id, { text: "Hanya seller yang bisa menerima pesanan.", show_alert: true });
+        return;
+      }
+      const orderId = parseInt(acceptMatch[1]!, 10);
+      const order = store.acceptOrder(orderId, userId);
+      if (!order) {
+        await bot.editMessageText("⚠️ Pesanan sudah diterima atau tidak tersedia.", {
+          chat_id: chatId, message_id: query.message!.message_id,
+        });
+        await bot.answerCallbackQuery(query.id);
+        return;
+      }
+      logger.info({ orderId, sellerId: userId }, "Order accepted");
+      await bot.editMessageText(
+        `${formatOrder(order)}\n\n✅ Pesanan diterima oleh seller.`,
+        { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
+      );
+      await bot.answerCallbackQuery(query.id, { text: "Pesanan diterima!" });
+      await notify(order.customerId, `✅ *Pesanan #${order.id} diterima seller!*\n\nDriver akan segera mengambil pesananmu.`);
+      const drivers = store.getUsersByRole("driver");
+      for (const driver of drivers) {
+        await notify(driver.telegramId, `🔔 *Ada Pesanan Baru untuk Diantar!*\n\nPesanan #${order.id}\n📝 ${order.description}\n\nBuka *🚚 Pengiriman Tersedia* untuk mengambil.`);
+      }
+      return;
+    }
+
+    // ── Driver: ambil pengiriman ─────────────────────────────────────────────
+    const claimMatch = data.match(/^claim_order:(\d+)$/);
+    if (claimMatch) {
+      const user = store.getUser(userId);
+      if (!user || user.role !== "driver") {
+        await bot.answerCallbackQuery(query.id, { text: "Hanya driver yang bisa mengambil pengiriman.", show_alert: true });
+        return;
+      }
+      const orderId = parseInt(claimMatch[1]!, 10);
+      const order = store.claimOrder(orderId, userId);
+      if (!order) {
+        await bot.editMessageText("⚠️ Pesanan sudah diambil driver lain.", {
+          chat_id: chatId, message_id: query.message!.message_id,
+        });
+        await bot.answerCallbackQuery(query.id);
+        return;
+      }
+      logger.info({ orderId, driverId: userId }, "Order claimed");
+      await bot.editMessageText(
+        `${formatOrder(order)}\n\n🚗 Kamu sedang mengantarkan pesanan ini.`,
+        { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
+      );
+      await bot.answerCallbackQuery(query.id, { text: "Pengiriman diambil!" });
+      await notify(order.customerId, `🚗 *Pesanan #${order.id} sedang diantar!*\n\nDriver sedang dalam perjalanan.`);
+      if (order.sellerId) {
+        await notify(order.sellerId, `🚗 *Pesanan #${order.id} diambil driver.*\nSedang dalam pengiriman.`);
+      }
+      return;
+    }
+
+    // ── Driver: tandai terkirim ──────────────────────────────────────────────
+    const deliverMatch = data.match(/^deliver_order:(\d+)$/);
+    if (deliverMatch) {
+      const user = store.getUser(userId);
+      if (!user || user.role !== "driver") {
+        await bot.answerCallbackQuery(query.id, { text: "Hanya driver yang bisa menandai kiriman.", show_alert: true });
+        return;
+      }
+      const orderId = parseInt(deliverMatch[1]!, 10);
+      const order = store.markDelivered(orderId, userId);
+      if (!order) {
+        await bot.answerCallbackQuery(query.id, { text: "Tidak bisa menandai pesanan ini.", show_alert: true });
+        return;
+      }
+      logger.info({ orderId, driverId: userId }, "Order delivered");
+      await bot.editMessageText(
+        `${formatOrder(order)}\n\n📦 Pesanan telah berhasil dikirim!`,
+        { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
+      );
+      await bot.answerCallbackQuery(query.id, { text: "Pengiriman selesai!" });
+      if (order.sellerId) {
+        await notify(order.sellerId, `📦 *Pesanan #${order.id} berhasil terkirim!*`);
+      }
+      await bot.sendMessage(
+        order.customerId,
+        `📦 *Pesanan #${order.id} sudah sampai!*\n\n${order.description}\n\nBeri rating untuk driver kamu:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [1, 2, 3, 4, 5].map((r) => ({
+                text: "⭐".repeat(r),
+                callback_data: `rate_order:${order.id}:${r}`,
+              })),
+            ],
+          },
+        },
+      );
+      return;
+    }
+
+    // ── Customer: batalkan pesanan ───────────────────────────────────────────
+    const cancelMatch = data.match(/^cancel_order:(\d+)$/);
     if (cancelMatch) {
       const user = store.getUser(userId);
       if (!user || user.role !== "customer") {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Hanya customer yang bisa membatalkan pesanan.",
-          show_alert: true,
-        });
+        await bot.answerCallbackQuery(query.id, { text: "Hanya customer yang bisa membatalkan pesanan.", show_alert: true });
         return;
       }
       const orderId = parseInt(cancelMatch[1]!, 10);
       const order = store.cancelOrder(orderId, userId);
       if (!order) {
-        await bot.editMessageText(
-          "⚠️ Pesanan tidak bisa dibatalkan. Mungkin sudah diambil driver atau sudah selesai.",
-          { chat_id: chatId, message_id: query.message!.message_id },
-        );
+        await bot.editMessageText("⚠️ Pesanan tidak bisa dibatalkan. Mungkin sudah diambil driver atau sudah selesai.", {
+          chat_id: chatId, message_id: query.message!.message_id,
+        });
         await bot.answerCallbackQuery(query.id);
         return;
       }
@@ -638,223 +1198,40 @@ export function startBot(): TelegramBot | null {
         { chat_id: chatId, message_id: query.message!.message_id, parse_mode: "Markdown" },
       );
       await bot.answerCallbackQuery(query.id, { text: "Pesanan dibatalkan." });
-
-      // Notifikasi seller jika sudah menerima pesanan
       if (order.sellerId) {
-        await notify(
-          order.sellerId,
-          `❌ *Pesanan #${order.id} Dibatalkan*\n📝 ${order.description}\n\nCustomer telah membatalkan pesanan ini.`,
-        );
+        await notify(order.sellerId, `❌ *Pesanan #${order.id} Dibatalkan*\n📝 ${order.description}\n\nCustomer membatalkan pesanan ini.`);
       }
       return;
     }
 
-    if (acceptMatch) {
-      const user = store.getUser(userId);
-      if (!user || user.role !== "seller") {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Only sellers can accept orders.",
-          show_alert: true,
-        });
-        return;
-      }
-      const orderId = parseInt(acceptMatch[1]!, 10);
-      const order = store.acceptOrder(orderId, userId);
-      if (!order) {
-        await bot.editMessageText(
-          "⚠️ This order has already been accepted or is no longer available.",
-          { chat_id: chatId, message_id: query.message!.message_id },
-        );
-        await bot.answerCallbackQuery(query.id);
-        return;
-      }
-      logger.info({ orderId, sellerId: userId }, "Order accepted");
-      await bot.editMessageText(
-        `${formatOrder(order)}\n\n✅ You accepted this order! Waiting for a driver to pick it up.`,
-        {
-          chat_id: chatId,
-          message_id: query.message!.message_id,
-          parse_mode: "Markdown",
-        },
-      );
-      await bot.answerCallbackQuery(query.id, { text: "Order accepted!" });
-
-      // Notifikasi customer
-      await notify(
-        order.customerId,
-        `✅ *Pesanan #${order.id} Diterima!*\n📝 ${order.description}\n\nPesanan kamu sedang diproses oleh seller. Driver akan segera mengambilnya.`,
-      );
-      // Notifikasi semua driver
-      const drivers = store.getUsersByRole("driver");
-      for (const driver of drivers) {
-        await notify(
-          driver.telegramId,
-          `🚗 *Pesanan Siap Diambil #${order.id}*\n📝 ${order.description}\n\nBuka *🚚 Available Deliveries* untuk mengambil pengiriman ini.`,
-        );
-      }
-      return;
-    }
-
-    if (claimMatch) {
-      const user = store.getUser(userId);
-      if (!user || user.role !== "driver") {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Only drivers can claim deliveries.",
-          show_alert: true,
-        });
-        return;
-      }
-      const orderId = parseInt(claimMatch[1]!, 10);
-      const order = store.claimOrder(orderId, userId);
-      if (!order) {
-        await bot.editMessageText(
-          "⚠️ This delivery has already been claimed or is unavailable.",
-          { chat_id: chatId, message_id: query.message!.message_id },
-        );
-        await bot.answerCallbackQuery(query.id);
-        return;
-      }
-      logger.info({ orderId, driverId: userId }, "Order claimed");
-      await bot.editMessageText(
-        `${formatOrder(order)}\n\n🚗 You claimed this delivery! Go pick it up.`,
-        {
-          chat_id: chatId,
-          message_id: query.message!.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "📦 Mark Delivered", callback_data: `deliver_order:${order.id}` }],
-            ],
-          },
-        },
-      );
-      await bot.answerCallbackQuery(query.id, { text: "Delivery claimed!" });
-
-      // Notifikasi customer
-      await notify(
-        order.customerId,
-        `🚗 *Pesanan #${order.id} Sedang Diantar!*\n📝 ${order.description}\n\nDriver sudah mengambil pesananmu dan dalam perjalanan.`,
-      );
-      // Notifikasi seller
-      if (order.sellerId) {
-        await notify(
-          order.sellerId,
-          `🚗 *Driver Mengambil Pesanan #${order.id}*\n📝 ${order.description}\n\nPesanan sedang dalam pengiriman.`,
-        );
-      }
-      return;
-    }
-
-    if (deliverMatch) {
-      const user = store.getUser(userId);
-      if (!user || user.role !== "driver") {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Only drivers can mark deliveries.",
-          show_alert: true,
-        });
-        return;
-      }
-      const orderId = parseInt(deliverMatch[1]!, 10);
-      const order = store.markDelivered(orderId, userId);
-      if (!order) {
-        await bot.editMessageText(
-          "⚠️ Could not update this order. It may already be delivered.",
-          { chat_id: chatId, message_id: query.message!.message_id },
-        );
-        await bot.answerCallbackQuery(query.id);
-        return;
-      }
-      logger.info({ orderId, driverId: userId }, "Order delivered");
-      await bot.editMessageText(
-        `${formatOrder(order)}\n\n🎉 Delivery complete! Great job!`,
-        {
-          chat_id: chatId,
-          message_id: query.message!.message_id,
-          parse_mode: "Markdown",
-        },
-      );
-      await bot.answerCallbackQuery(query.id, { text: "Marked as delivered! 🎉" });
-
-      // Notifikasi customer + minta rating
-      await notify(
-        order.customerId,
-        `📦 *Pesanan #${order.id} Telah Sampai!*\n📝 ${order.description}\n\n🎉 Pesananmu sudah terkirim. Terima kasih sudah berbelanja!`,
-      );
-      try {
-        await bot.sendMessage(
-          order.customerId,
-          `⭐ *Beri Rating untuk Driver*\n\nBagaimana pengalaman pengirimanmu untuk Pesanan #${order.id}?`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  { text: "⭐ 1", callback_data: `rate_order:${order.id}:1` },
-                  { text: "⭐⭐ 2", callback_data: `rate_order:${order.id}:2` },
-                  { text: "⭐⭐⭐ 3", callback_data: `rate_order:${order.id}:3` },
-                  { text: "⭐⭐⭐⭐ 4", callback_data: `rate_order:${order.id}:4` },
-                  { text: "⭐⭐⭐⭐⭐ 5", callback_data: `rate_order:${order.id}:5` },
-                ],
-              ],
-            },
-          },
-        );
-      } catch (err) {
-        logger.warn({ err }, "Failed to send rating prompt");
-      }
-      // Notifikasi seller
-      if (order.sellerId) {
-        await notify(
-          order.sellerId,
-          `✅ *Pesanan #${order.id} Selesai Dikirim!*\n📝 ${order.description}\n\nPesanan berhasil diterima oleh customer.`,
-        );
-      }
-      return;
-    }
-
+    // ── Customer: rating driver ──────────────────────────────────────────────
+    const rateMatch = data.match(/^rate_order:(\d+):([1-5])$/);
     if (rateMatch) {
       const orderId = parseInt(rateMatch[1]!, 10);
-      const stars = parseInt(rateMatch[2]!, 10);
-      const order = store.rateOrder(orderId, userId, stars);
-
+      const rating = parseInt(rateMatch[2]!, 10);
+      const order = store.rateOrder(orderId, userId, rating);
       if (!order) {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Rating sudah diberikan atau pesanan tidak valid.",
-          show_alert: true,
-        });
+        await bot.answerCallbackQuery(query.id, { text: "Rating sudah diberikan atau pesanan tidak valid.", show_alert: true });
         return;
       }
-
-      const starStr = "⭐".repeat(stars);
-      logger.info({ orderId, userId, stars }, "Order rated");
-
-      await bot.editMessageText(
-        `${starStr} *Rating Tersimpan!*\n\nKamu memberi *${stars}/5* bintang untuk pengiriman Pesanan #${order.id}.\nTerima kasih atas penilaianmu!`,
-        {
-          chat_id: chatId,
-          message_id: query.message!.message_id,
-          parse_mode: "Markdown",
-        },
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [[{ text: `${"⭐".repeat(rating)} — Terima kasih!`, callback_data: "noop" }]] },
+        { chat_id: chatId, message_id: query.message!.message_id },
       );
-      await bot.answerCallbackQuery(query.id, { text: `${starStr} Terima kasih!` });
-
-      // Notifikasi driver tentang rating
+      await bot.answerCallbackQuery(query.id, { text: `⭐ Rating ${rating}/5 diberikan!` });
       if (order.driverId) {
-        await notify(
-          order.driverId,
-          `⭐ *Kamu mendapat rating baru!*\n\nPesanan #${order.id}: *${stars}/5* ${starStr}\n\nTerima kasih sudah memberikan pelayanan terbaik!`,
-        );
+        await notify(order.driverId, `⭐ *Rating baru!*\n\nKamu mendapat rating *${rating}/5* untuk Pesanan #${order.id}.`);
       }
       return;
     }
+
+    // ── Menu edit: tangani ID item dari input teks di message handler ────────
+    // (Handled via menuEditState in message handler for edit_price/delete/toggle
+    //  but the initial ID selection goes through the message handler)
 
     await bot.answerCallbackQuery(query.id);
   });
 
-  logger.info("Telegram bot started (polling)");
+  logger.info("Bot Telegram berhasil dijalankan");
   return bot;
-}
-
-function escapeMarkdown(text: string): string {
-  return text.replace(/[_*[\]()~`>#+=|{}.!\\-]/g, "\\$&");
 }
